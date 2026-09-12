@@ -38,7 +38,6 @@ describe("retention sweep", () => {
     for (const table of [
       "WebhookEvent",
       "OperationalEvent",
-      "ProcessedComment",
       "LinkClick",
       "DmLog",
     ]) {
@@ -54,7 +53,6 @@ describe("retention sweep", () => {
     const expected: [string, number][] = [
       ["WebhookEvent", RETENTION_DAYS.webhookEvent],
       ["OperationalEvent", RETENTION_DAYS.operationalEvent],
-      ["ProcessedComment", RETENTION_DAYS.processedComment],
       ["LinkClick", RETENTION_DAYS.linkClick],
       ["DmLog", RETENTION_DAYS.dmLog],
     ];
@@ -63,13 +61,6 @@ describe("retention sweep", () => {
       const cutoff = cutoffOf(callsFor(table)[0]);
       expect(cutoff.getTime()).toBe(now.getTime() - days * day);
     }
-  });
-
-  it("keeps the dedup guard longer than the reconciler's reach", async () => {
-    // ProcessedComment is what stops a comment being DMed twice. If it expired
-    // before the polling reconciler stopped looking at a post, an old comment
-    // could be re-enqueued and the user would get a duplicate DM.
-    expect(RETENTION_DAYS.processedComment).toBeGreaterThanOrEqual(30);
   });
 
   it("keeps sending batches while a table is still full, then stops", async () => {
@@ -104,7 +95,6 @@ describe("retention sweep", () => {
     expect(deleted).toEqual({
       webhookEvent: 3,
       operationalEvent: 3,
-      processedComment: 3,
       linkClick: 3,
       dmLog: 3,
     });

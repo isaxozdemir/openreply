@@ -116,38 +116,58 @@ export async function getCampaignReportBySlug(shareSlug: string) {
       _count: row._count._all,
     }))
   );
-  const daily = await Promise.all(
-    Array.from({ length: 7 }, async (_, index) => {
-      const daysAgo = 6 - index;
-      const { start, end } = getDayWindow(daysAgo);
-      const [sent, clicks] = await Promise.all([
-        prisma.dmLog.count({
-          where: {
-            workspaceId: automation.workspaceId,
-            automationId: automation.id,
-            status: "SENT",
-            createdAt: { gte: start, lt: end },
-          },
-        }),
-        prisma.linkClick.count({
-          where: {
-            workspaceId: automation.workspaceId,
-            automationId: automation.id,
-            createdAt: { gte: start, lt: end },
-          },
-        }),
-      ]);
+  // Two queries for the whole week, bucketed in memory — not fourteen counts,
+  // one per day per metric. Both are already bounded to seven days.
+  const weekStart = getDayWindow(6).start;
+  const weekEnd = getDayWindow(0).end;
 
-      return {
-        date: start.toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-        }),
-        sent,
-        clicks,
-      };
-    })
-  );
+  const [sentRows, clickRows] = await Promise.all([
+    prisma.dmLog.findMany({
+      where: {
+        workspaceId: automation.workspaceId,
+        automationId: automation.id,
+        status: "SENT",
+        createdAt: { gte: weekStart, lt: weekEnd },
+      },
+      select: { createdAt: true },
+    }),
+    prisma.linkClick.findMany({
+      where: {
+        workspaceId: automation.workspaceId,
+        automationId: automation.id,
+        createdAt: { gte: weekStart, lt: weekEnd },
+      },
+      select: { createdAt: true },
+    }),
+  ]);
+
+  const bucket = (rows: { createdAt: Date }[]) => {
+    const counts = new Map<number, number>();
+    for (const row of rows) {
+      const day = new Date(row.createdAt);
+      day.setHours(0, 0, 0, 0);
+      const key = day.getTime();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  };
+
+  const sentByDay = bucket(sentRows);
+  const clicksByDay = bucket(clickRows);
+
+  const daily = Array.from({ length: 7 }, (_, index) => {
+    const { start } = getDayWindow(6 - index);
+    const key = start.getTime();
+
+    return {
+      date: start.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+      }),
+      sent: sentByDay.get(key) ?? 0,
+      clicks: clicksByDay.get(key) ?? 0,
+    };
+  });
 
   return {
     shareSlug: automation.reportShareSlug,

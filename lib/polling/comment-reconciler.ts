@@ -272,21 +272,38 @@ async function sweepCampaign(
  */
 export async function adMediaFor(postId: string): Promise<string[]> {
   try {
-    const rows = await prisma.$queryRaw<{ mediaId: string | null }[]>`
-      SELECT DISTINCT change->'value'->'media'->>'id' AS "mediaId"
-      FROM "WebhookEvent" w,
-           jsonb_array_elements(w.payload::jsonb->'entry') entry,
-           jsonb_array_elements(entry->'changes') change
-      WHERE change->>'field' = 'comments'
-        AND change->'value'->'media'->>'original_media_id' = ${postId}
-        AND w."createdAt" > now() - interval '90 days'
-    `;
-    return rows
-      .map((r) => r.mediaId)
-      .filter((id): id is string => Boolean(id) && id !== postId);
+    const rows = await prisma.adMediaMapping.findMany({
+      where: { originalMediaId: postId },
+      select: { mediaId: true },
+    });
+    return rows.map((r) => r.mediaId).filter((id) => id !== postId);
   } catch {
     // A failure here must not stop the sweep: the post itself is still checked.
     return [];
+  }
+}
+
+/**
+ * Record that a comment arrived on an ad made from `originalMediaId`.
+ *
+ * Called from the webhook path, where the pairing is present on the event.
+ * Idempotent: the same ad is seen on every comment, so this collapses onto one
+ * row and only refreshes lastSeenAt.
+ */
+export async function recordAdMedia(
+  originalMediaId: string,
+  mediaId: string
+): Promise<void> {
+  if (!originalMediaId || !mediaId || originalMediaId === mediaId) return;
+  try {
+    await prisma.adMediaMapping.upsert({
+      where: { originalMediaId_mediaId: { originalMediaId, mediaId } },
+      create: { originalMediaId, mediaId },
+      update: { lastSeenAt: new Date() },
+    });
+  } catch {
+    // Best effort: losing the mapping costs the sweep visibility into that ad,
+    // never the delivery of the comment being processed right now.
   }
 }
 

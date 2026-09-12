@@ -9,6 +9,7 @@ import {
   verifyWebhookSignature,
 } from "@/lib/meta/webhook";
 import { MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from "@/lib/queue/client";
+import { recordAdMedia } from "@/lib/polling/comment-reconciler";
 import { Prisma } from "@/app/generated/prisma/client";
 
 const OPENING_DM_READ_FALLBACK_DELAY_MS = 5 * 60 * 1000;
@@ -67,8 +68,45 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const commentEvents = parseCommentEvents(
+    payload as Parameters<typeof parseCommentEvents>[0]
+  );
+  const postbackEvents = parsePostbackEvents(
+    payload as Parameters<typeof parsePostbackEvents>[0]
+  );
+  const messageEvents = parseMessageEvents(
+    payload as Parameters<typeof parseMessageEvents>[0]
+  );
+  const readEvents = parseReadEvents(
+    payload as Parameters<typeof parseReadEvents>[0]
+  );
+
+  // Resolve every account the delivery touches in one query. Meta batches many
+  // changes into a single delivery and they are almost always for the same
+  // account, so the previous per-event findUnique re-fetched one identical row
+  // dozens of times — all of it serial, all of it before Meta gets its 200.
+  const accountIds = [
+    ...new Set(
+      [...commentEvents, ...messageEvents].map((e) => e.instagramAccountId)
+    ),
+  ];
+  const accounts =
+    accountIds.length > 0
+      ? await prisma.instagramAccount.findMany({
+          where: { instagramId: { in: accountIds } },
+          select: { instagramId: true, workspaceId: true },
+        })
+      : [];
+  // A delivery belongs to one workspace in practice — Meta sends one entry per
+  // account. Attribute the row at insert time instead of UPDATEing it once per
+  // event; if a delivery ever did span workspaces, leave it unattributed rather
+  // than claim the wrong one.
+  const workspaceIds = [...new Set(accounts.map((a) => a.workspaceId))];
+  const workspaceId = workspaceIds.length === 1 ? workspaceIds[0] : null;
+
   const webhookEvent = await prisma.webhookEvent.create({
     data: {
+      workspaceId,
       object:
         typeof payload === "object" && payload && "object" in payload
           ? String(payload.object)
@@ -79,20 +117,16 @@ export async function POST(request: NextRequest) {
   });
 
   try {
-    const commentEvents = parseCommentEvents(
-      payload as Parameters<typeof parseCommentEvents>[0]
-    );
     const queue = getDMQueue();
 
-    for (const event of commentEvents) {
-      const account = await prisma.instagramAccount.findUnique({
-        where: { instagramId: event.instagramAccountId },
-        select: { workspaceId: true },
-      });
+    // Every job for this delivery goes to Redis in one pipelined call rather
+    // than one round trip per event.
+    const jobs: Parameters<ReturnType<typeof getDMQueue>["addBulk"]>[0] = [];
 
-      await queue.add(
-        "process-comment",
-        {
+    for (const event of commentEvents) {
+      jobs.push({
+        name: "process-comment",
+        data: {
           instagramAccountId: event.instagramAccountId,
           commentId: event.commentId,
           commentText: event.commentText,
@@ -102,63 +136,43 @@ export async function POST(request: NextRequest) {
           originalMediaId: event.originalMediaId,
           source: "WEBHOOK",
         },
-        {
+        opts: {
           jobId: `comment_${event.instagramAccountId}_${event.commentId}`,
-        }
-      );
-
-      if (account) {
-        await prisma.webhookEvent.update({
-          where: { id: webhookEvent.id },
-          data: { workspaceId: account.workspaceId },
-        });
-      }
+        },
+      });
     }
 
     // Button taps from opening DMs → deliver the reveal message.
-    const postbackEvents = parsePostbackEvents(
-      payload as Parameters<typeof parsePostbackEvents>[0]
-    );
-
     for (const event of postbackEvents) {
-      await queue.add(
-        POSTBACK_JOB_NAME,
-        {
+      jobs.push({
+        name: POSTBACK_JOB_NAME,
+        data: {
           instagramAccountId: event.instagramAccountId,
           userId: event.userId,
           payload: event.payload,
           mid: event.mid,
         },
-        {
+        opts: {
           // BullMQ forbids ":" in custom job ids, and the payload is
           // "reveal:<id>", so build with underscores and strip any colons.
           jobId: `postback_${event.instagramAccountId}_${event.userId}_${(
             event.mid ?? event.payload
           ).replace(/:/g, "_")}`,
-        }
-      );
+        },
+      });
     }
 
     // Inbound DMs → keyword-triggered autoreply.
-    const messageEvents = parseMessageEvents(
-      payload as Parameters<typeof parseMessageEvents>[0]
-    );
-
     for (const event of messageEvents) {
-      const account = await prisma.instagramAccount.findUnique({
-        where: { instagramId: event.instagramAccountId },
-        select: { workspaceId: true },
-      });
-
-      await queue.add(
-        MESSAGE_JOB_NAME,
-        {
+      jobs.push({
+        name: MESSAGE_JOB_NAME,
+        data: {
           instagramAccountId: event.instagramAccountId,
           messageId: event.messageId,
           messageText: event.messageText,
           senderId: event.senderId,
         },
-        {
+        opts: {
           // Message ids can contain characters BullMQ rejects in a job id (":"
           // in particular). base64url encodes into exactly the allowed alphabet
           // and stays injective — substituting invalid characters would let two
@@ -166,24 +180,13 @@ export async function POST(request: NextRequest) {
           jobId: `message_${event.instagramAccountId}_${Buffer.from(
             event.messageId
           ).toString("base64url")}`,
-        }
-      );
-
-      if (account) {
-        await prisma.webhookEvent.update({
-          where: { id: webhookEvent.id },
-          data: { workspaceId: account.workspaceId },
-        });
-      }
+        },
+      });
     }
 
     // If a user reads the opening DM and never taps the button, deliver the
     // same next-step DM after five minutes. The worker no-ops this delayed job
     // if a real button tap has already delivered the reveal.
-    const readEvents = parseReadEvents(
-      payload as Parameters<typeof parseReadEvents>[0]
-    );
-
     for (const event of readEvents) {
       const openingLogs = await prisma.dmLog.findMany({
         where: {
@@ -212,29 +215,50 @@ export async function POST(request: NextRequest) {
         if (scheduledAutomationIds.has(automation.id)) continue;
         scheduledAutomationIds.add(automation.id);
 
-        await queue.add(
-          POSTBACK_JOB_NAME,
-          {
+        jobs.push({
+          name: POSTBACK_JOB_NAME,
+          data: {
             instagramAccountId: event.instagramAccountId,
             userId: event.userId,
             payload: `reveal:${automation.id}`,
             fallback: true,
           },
-          {
+          opts: {
             delay: OPENING_DM_READ_FALLBACK_DELAY_MS,
             jobId: `read_fallback_${event.instagramAccountId}_${event.userId}_${automation.id}`,
-          }
-        );
+          },
+        });
       }
     }
 
-    await prisma.webhookEvent.update({
-      where: { id: webhookEvent.id },
-      data: {
-        status: "PROCESSED",
-        processedAt: new Date(),
-      },
-    });
+    if (jobs.length > 0) {
+      await queue.addBulk(jobs);
+    }
+
+    // Remember which ads a post was boosted into, so the polling sweep can see
+    // comments left on them. Not awaited — the mapping is a sweep optimisation,
+    // and Meta is waiting on this response.
+    const adPairs = new Map<string, string>();
+    for (const event of commentEvents) {
+      if (event.originalMediaId && event.originalMediaId !== event.mediaId) {
+        adPairs.set(`${event.originalMediaId}|${event.mediaId}`, event.mediaId);
+      }
+    }
+    for (const key of adPairs.keys()) {
+      const [originalMediaId, mediaId] = key.split("|");
+      void recordAdMedia(originalMediaId, mediaId);
+    }
+
+    // The row is inserted PENDING and only ever read back when it is FAILED
+    // (the diagnostics panel) — nothing queries PROCESSED. Marking it costs a
+    // guaranteed extra round trip before the 200, so record the success
+    // without blocking the response Meta is waiting on.
+    void prisma.webhookEvent
+      .update({
+        where: { id: webhookEvent.id },
+        data: { status: "PROCESSED", processedAt: new Date() },
+      })
+      .catch(() => {});
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {

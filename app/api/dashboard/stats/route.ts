@@ -142,32 +142,51 @@ export async function GET(request: NextRequest) {
         })
       : Promise.resolve(null),
     // Distinct people who have interacted, counted as "contacts".
-    prisma.dmLog.findMany({
+    // groupBy aggregates in Postgres; Prisma's `distinct` is applied in memory,
+    // which meant loading every DmLog row for the workspace on each request.
+    prisma.dmLog.groupBy({
+      by: ["commenterId"],
       where: { workspaceId, ...accountFilter },
-      distinct: ["commenterId"],
-      select: { commenterId: true },
+      _count: { _all: true },
     }),
   ]);
+
+  // One query for the whole week instead of seven sequential counts, then
+  // bucket in memory. The rows are already filtered to seven days, so this is a
+  // small result set regardless of how much history the workspace has.
+  // Distinct from `weekStart` above (a rolling 7 days): the chart covers the
+  // six preceding days plus today.
+  const chartStart = new Date(todayStart);
+  chartStart.setDate(chartStart.getDate() - 6);
+  const chartEnd = new Date(todayStart);
+  chartEnd.setDate(chartEnd.getDate() + 1);
+
+  const sentThisWeek = await prisma.dmLog.findMany({
+    where: {
+      workspaceId,
+      status: "SENT",
+      createdAt: { gte: chartStart, lt: chartEnd },
+      ...accountFilter,
+    },
+    select: { createdAt: true },
+  });
+
+  const countByDay = new Map<string, number>();
+  for (const row of sentThisWeek) {
+    const day = new Date(row.createdAt);
+    day.setHours(0, 0, 0, 0);
+    const key = day.toISOString();
+    countByDay.set(key, (countByDay.get(key) ?? 0) + 1);
+  }
 
   const dailyDMs: { date: string; count: number }[] = [];
   for (let i = 6; i >= 0; i--) {
     const dayStart = new Date(todayStart);
     dayStart.setDate(dayStart.getDate() - i);
-    const dayEnd = new Date(dayStart);
-    dayEnd.setDate(dayEnd.getDate() + 1);
-
-    const count = await prisma.dmLog.count({
-      where: {
-        workspaceId,
-        status: "SENT",
-        createdAt: { gte: dayStart, lt: dayEnd },
-        ...accountFilter,
-      },
-    });
 
     dailyDMs.push({
       date: dayStart.toLocaleDateString("en-US", { weekday: "short" }),
-      count,
+      count: countByDay.get(dayStart.toISOString()) ?? 0,
     });
   }
 

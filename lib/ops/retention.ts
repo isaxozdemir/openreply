@@ -15,9 +15,6 @@
  *   anything older than a week has already been acted on or never will be.
  * - WebhookEvent carries the full Meta payload, one row per delivery. A week is
  *   enough to investigate a bad delivery; older rows are dead weight.
- * - ProcessedComment is the dedup guard. Its window must stay comfortably
- *   longer than any path that could re-enqueue an old comment — the polling
- *   reconciler only looks at recent media, so 30 days leaves wide margin.
  * - DmLog is the user-visible send history shown in the dashboard, so it is
  *   kept far longer and is not part of the aggressive sweep.
  * - LinkClick backs click/CTR stats, kept at a year.
@@ -28,7 +25,6 @@ import { prisma } from "@/lib/db/client";
 export const RETENTION_DAYS = {
   webhookEvent: 7,
   operationalEvent: 7,
-  processedComment: 30,
   linkClick: 365,
   dmLog: 365,
 } as const;
@@ -53,7 +49,6 @@ export async function pruneExpiredRecords(
   const deleted: RetentionResult = {
     webhookEvent: 0,
     operationalEvent: 0,
-    processedComment: 0,
     linkClick: 0,
     dmLog: 0,
   };
@@ -79,18 +74,6 @@ export async function pruneExpiredRecords(
         LIMIT ${limit}
       )`,
     cutoff(RETENTION_DAYS.operationalEvent, now),
-    batchSize
-  );
-
-  deleted.processedComment = await pruneTable(
-    (before, limit) => prisma.$executeRaw`
-      DELETE FROM "ProcessedComment"
-      WHERE "id" IN (
-        SELECT "id" FROM "ProcessedComment"
-        WHERE "seenAt" < ${before}
-        LIMIT ${limit}
-      )`,
-    cutoff(RETENTION_DAYS.processedComment, now),
     batchSize
   );
 

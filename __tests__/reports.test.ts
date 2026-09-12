@@ -8,10 +8,12 @@ const { mockPrisma } = vi.hoisted(() => ({
     dmLog: {
       groupBy: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       count: vi.fn(),
     },
     linkClick: {
       count: vi.fn(),
+      findMany: vi.fn(),
     },
   },
 }));
@@ -69,6 +71,51 @@ beforeEach(() => {
     createdAt: new Date("2026-05-20T12:00:00.000Z"),
   });
   mockPrisma.dmLog.count.mockResolvedValue(2);
+  mockPrisma.dmLog.findMany.mockResolvedValue([]);
+  mockPrisma.linkClick.findMany.mockResolvedValue([]);
+});
+
+describe("campaign reports — daily series", () => {
+  it("fetches the week in two queries, not fourteen counts", async () => {
+    await getCampaignReportBySlug("report_123");
+
+    // One findMany per metric for the whole window; the per-day counts that
+    // used to run here were 14 sequential round trips per report view.
+    expect(mockPrisma.dmLog.findMany).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.linkClick.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("buckets rows onto the right day", async () => {
+    const today = new Date();
+    today.setHours(12, 0, 0, 0);
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    mockPrisma.dmLog.findMany.mockResolvedValue([
+      { createdAt: today },
+      { createdAt: today },
+      { createdAt: yesterday },
+    ]);
+    mockPrisma.linkClick.findMany.mockResolvedValue([{ createdAt: today }]);
+
+    const report = await getCampaignReportBySlug("report_123");
+    const daily = report!.daily;
+
+    expect(daily).toHaveLength(7);
+    expect(daily[6].sent).toBe(2);
+    expect(daily[6].clicks).toBe(1);
+    expect(daily[5].sent).toBe(1);
+    expect(daily[5].clicks).toBe(0);
+  });
+
+  it("reports zero for days with no activity", async () => {
+    mockPrisma.dmLog.findMany.mockResolvedValue([]);
+    mockPrisma.linkClick.findMany.mockResolvedValue([]);
+
+    const report = await getCampaignReportBySlug("report_123");
+
+    expect(report!.daily.every((d) => d.sent === 0 && d.clicks === 0)).toBe(true);
+  });
 });
 
 describe("campaign reports", () => {

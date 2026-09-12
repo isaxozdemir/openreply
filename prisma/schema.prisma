@@ -251,22 +251,38 @@ model DmLog {
   @@index([automationId])
   @@index([instagramAccountId])
   @@index([status])
+  // The cross-campaign private-reply guard looks up by commentId alone, once
+  // per matched comment. The [automationId, commentId] unique above cannot
+  // serve it — wrong leading column — so without this it is a sequential scan
+  // in the hot path.
+  @@index([commentId])
+  // Read receipts in the webhook path filter on commenterId.
+  @@index([commenterId])
+  // The dashboard lists and counts a workspace's logs newest-first, and the
+  // retention sweep deletes by age.
+  @@index([workspaceId, createdAt])
+  @@index([createdAt])
 }
 
-// Every comment the system has seen, from either the webhook or the polling
-// reconciler. This is the shared dedup set: a comment id present here has
-// already been queued for processing, so neither path acts on it twice. It is
-// distinct from DmLog (which only records comments that matched a campaign);
-// this records all comments so the reconciler doesn't re-sweep non-matching
-// ones every cycle.
-model ProcessedComment {
-  id                 String   @id @default(cuid())
-  instagramAccountId String
-  commentId          String   @unique
-  source             String // "WEBHOOK" | "POLLING"
-  seenAt             DateTime @default(now())
+// Maps an ad's media id to the organic post it was created from.
+//
+// Campaigns are bound to the organic post, so a comment left on an ad has to be
+// resolved back to it. The mapping used to be recovered by scanning every
+// WebhookEvent payload with a JSONB unnest on each sweep — a full scan of the
+// fastest-growing table, every five minutes, per campaign. Recording the pair
+// once when the comment arrives makes that an indexed lookup, and keeps the
+// mapping even after the raw payloads are pruned.
+model AdMediaMapping {
+  id              String   @id @default(cuid())
+  // The organic post the ad was made from.
+  originalMediaId String
+  // The ad's own media id, which is what comments actually arrive on.
+  mediaId         String
+  firstSeenAt     DateTime @default(now())
+  lastSeenAt      DateTime @updatedAt
 
-  @@index([instagramAccountId])
+  @@unique([originalMediaId, mediaId])
+  @@index([originalMediaId])
 }
 
 model TrackedLink {
@@ -325,6 +341,9 @@ model WebhookEvent {
 
   @@index([workspaceId])
   @@index([status])
+  // Both the diagnostics list (newest-first) and the retention sweep order or
+  // filter by age on the fastest-growing table.
+  @@index([createdAt])
 }
 
 model OperationalEvent {
