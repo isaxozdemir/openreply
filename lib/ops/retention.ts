@@ -9,10 +9,12 @@
  *
  * These windows keep what is useful for debugging and drop what is not:
  *
- * - WebhookEvent carries the full Meta payload and is by far the heaviest
- *   writer (one row per delivery). A week is enough to investigate a bad
- *   delivery; older rows are dead weight.
- * - OperationalEvent is for spotting recent trouble, so 30 days.
+ * - OperationalEvent is the heaviest table in practice: the worker writes one
+ *   row per failed job attempt, so a post with thousands of comments produces
+ *   hundreds of thousands of rows. It exists to spot recent trouble, and
+ *   anything older than a week has already been acted on or never will be.
+ * - WebhookEvent carries the full Meta payload, one row per delivery. A week is
+ *   enough to investigate a bad delivery; older rows are dead weight.
  * - ProcessedComment is the dedup guard. Its window must stay comfortably
  *   longer than any path that could re-enqueue an old comment — the polling
  *   reconciler only looks at recent media, so 30 days leaves wide margin.
@@ -25,7 +27,7 @@ import { prisma } from "@/lib/db/client";
 
 export const RETENTION_DAYS = {
   webhookEvent: 7,
-  operationalEvent: 30,
+  operationalEvent: 7,
   processedComment: 30,
   linkClick: 365,
   dmLog: 365,

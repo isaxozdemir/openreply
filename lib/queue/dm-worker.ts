@@ -1278,6 +1278,77 @@ async function processJob(job: Job<DmQueueJob>): Promise<void> {
   return processComment(job as Job<ProcessCommentJob>);
 }
 
+// Per-account+reason failure counters, flushed on an interval instead of
+// written per failure. One row per failed attempt made OperationalEvent by far
+// the largest table on disk — a single viral post produced hundreds of
+// thousands of near-identical rows, which is what filled the volume. The
+// failure detail that matters per comment is already in DmLog; this table only
+// needs to answer "what is going wrong right now, and how often".
+const FAILURE_FLUSH_INTERVAL_MS = 60_000;
+
+type FailureBucket = {
+  workspaceId: string | null;
+  instagramAccountId: string | null;
+  message: string;
+  count: number;
+  firstSeen: Date;
+  lastSeen: Date;
+  sampleJobId: string | null;
+  sampleCommentId: string | null;
+};
+
+const pendingFailures = new Map<string, FailureBucket>();
+let failureFlushTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Write the aggregated failure counts, one row per distinct account+reason.
+ */
+async function flushWorkerFailures(): Promise<void> {
+  if (pendingFailures.size === 0) return;
+
+  const buckets = [...pendingFailures.values()];
+  pendingFailures.clear();
+
+  try {
+    await prisma.operationalEvent.createMany({
+      data: buckets.map((bucket) => ({
+        workspaceId: bucket.workspaceId,
+        source: "WORKER" as const,
+        level: "ERROR" as const,
+        message:
+          bucket.count === 1
+            ? `DM worker job failed: ${bucket.message}`
+            : `DM worker: ${bucket.count} jobs failed: ${bucket.message}`,
+        payload: {
+          count: bucket.count,
+          firstSeen: bucket.firstSeen.toISOString(),
+          lastSeen: bucket.lastSeen.toISOString(),
+          instagramAccountId: bucket.instagramAccountId,
+          sampleJobId: bucket.sampleJobId,
+          sampleCommentId: bucket.sampleCommentId,
+        },
+      })),
+    });
+  } catch (writeError) {
+    console.error(
+      "[DM Worker] Failed to record worker failures:",
+      formatError(writeError)
+    );
+  }
+}
+
+/**
+ * Stop the flush timer and write whatever is still buffered. Called on
+ * shutdown so the last minute of failures is not lost.
+ */
+export async function drainWorkerFailures(): Promise<void> {
+  if (failureFlushTimer) {
+    clearInterval(failureFlushTimer);
+    failureFlushTimer = null;
+  }
+  await flushWorkerFailures();
+}
+
 async function recordWorkerFailure(
   job: Job<DmQueueJob> | undefined,
   error: Error
@@ -1293,21 +1364,39 @@ async function recordWorkerFailure(
         })
       : null;
 
-    await prisma.operationalEvent.create({
-      data: {
-        workspaceId: account?.workspaceId ?? null,
-        source: "WORKER",
-        level: "ERROR",
-        message: `DM worker job ${job?.id ?? "unknown"} failed: ${error.message}`,
-        payload: {
-          jobId: job?.id ?? null,
-          attemptsMade: job?.attemptsMade ?? null,
-          instagramAccountId: instagramAccountId ?? null,
-          commentId,
-        },
-      },
-    });
+    // Group by account and reason so a thousand identical Meta rejections
+    // become one counted row rather than a thousand rows.
+    const key = `${instagramAccountId ?? "-"}|${error.message}`;
+    const now = new Date();
+    const existing = pendingFailures.get(key);
 
+    if (existing) {
+      existing.count += 1;
+      existing.lastSeen = now;
+    } else {
+      pendingFailures.set(key, {
+        workspaceId: account?.workspaceId ?? null,
+        instagramAccountId: instagramAccountId ?? null,
+        message: error.message,
+        count: 1,
+        firstSeen: now,
+        lastSeen: now,
+        sampleJobId: job?.id ?? null,
+        sampleCommentId: commentId,
+      });
+    }
+
+    if (!failureFlushTimer) {
+      failureFlushTimer = setInterval(
+        () => void flushWorkerFailures(),
+        FAILURE_FLUSH_INTERVAL_MS
+      );
+      // Never hold the process open just to flush counters.
+      failureFlushTimer.unref?.();
+    }
+
+    // The dashboard's recent-alerts list. Redis-backed and trimmed to 25
+    // entries, so it costs nothing on disk and stays per-failure.
     await recordWorkerAlert({
       level: "error",
       message: error.message,
@@ -1317,7 +1406,7 @@ async function recordWorkerFailure(
     });
   } catch (recordError) {
     console.error(
-      "[DM Worker] Failed to record worker failure:",
+      "[DM Worker] Failed to buffer worker failure:",
       formatError(recordError)
     );
   }

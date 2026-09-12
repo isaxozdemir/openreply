@@ -1,4 +1,4 @@
-import { createDMWorker } from "@/lib/queue/dm-worker";
+import { createDMWorker, drainWorkerFailures } from "@/lib/queue/dm-worker";
 import { recordWorkerHeartbeat } from "@/lib/ops/worker-health";
 import { reconcileComments } from "@/lib/polling/comment-reconciler";
 import os from "node:os";
@@ -48,6 +48,9 @@ async function shutdown(signal: string) {
   clearInterval(heartbeatTimer);
   clearInterval(pollTimer);
   await worker.close();
+  // Failure counts are buffered and flushed on an interval; write out whatever
+  // the last window collected rather than losing it on restart.
+  await drainWorkerFailures();
   process.exit(0);
 }
 
