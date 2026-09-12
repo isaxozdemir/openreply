@@ -33,6 +33,7 @@ import {
   reserveWorkspaceDMSend,
 } from "@/lib/billing/usage";
 import { recordWorkerAlert } from "@/lib/ops/worker-health";
+import { recordFunnelStage } from "@/lib/ops/funnel";
 import {
   buildTrackedUrl,
   renderMessageWithTracking,
@@ -297,6 +298,15 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     orderBy: { createdAt: "asc" },
   });
 
+  // Funnel counters. A comment that matches no campaign, or whose text misses
+  // every keyword, never reaches DmLog — so without these the drop-off between
+  // "people commented" and "people got a DM" is invisible.
+  await recordFunnelStage(instagramAccountId, "received");
+  if (automations.length > 0) {
+    await recordFunnelStage(instagramAccountId, "campaign_matched");
+  }
+  let anyKeywordMatched = false;
+
   for (const automation of automations) {
     // "Any word" campaigns fire on every comment; otherwise require a keyword hit.
     const matchResult = automation.matchAnyWord
@@ -309,6 +319,11 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
     if (!matchResult.matched) {
       continue;
+    }
+
+    if (!anyKeywordMatched) {
+      anyKeywordMatched = true;
+      await recordFunnelStage(instagramAccountId, "keyword_matched");
     }
 
     const existingLog = await prisma.dmLog.findUnique({

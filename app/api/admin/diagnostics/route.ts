@@ -3,6 +3,7 @@ import { getCurrentWorkspaceId } from "@/lib/auth";
 import { prisma } from "@/lib/db/client";
 import { getDMQueue } from "@/lib/queue/client";
 import { getWorkerAlerts, getWorkerHealth } from "@/lib/ops/worker-health";
+import { getFunnel } from "@/lib/ops/funnel";
 
 export const runtime = "nodejs";
 
@@ -91,6 +92,20 @@ export async function GET() {
     }),
   ]);
 
+  // How far comments get: received by the worker → covered by a campaign →
+  // matched a keyword. Everything past that point is already in DmLog.
+  const connectedAccounts = await prisma.instagramAccount.findMany({
+    where: { workspaceId },
+    select: { instagramId: true, username: true },
+  });
+  const funnels = await Promise.all(
+    connectedAccounts.map(async (account) => ({
+      instagramId: account.instagramId,
+      username: account.username,
+      days: await getFunnel(account.instagramId),
+    }))
+  );
+
   return NextResponse.json({
     success: true,
     data: {
@@ -101,6 +116,7 @@ export async function GET() {
       dmFailures,
       tokenRefreshFailures,
       operationalEvents,
+      funnels,
     },
   });
 }
