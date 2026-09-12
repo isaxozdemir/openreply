@@ -110,25 +110,62 @@ describe("webhook route under a burst", () => {
     ]);
   });
 
-  it("writes the webhook row once, attributed at insert time", async () => {
+  it("writes the webhook row once, attributed and never UPDATEd", async () => {
     await POST(signedRequest(commentBurst(100)));
 
-    // The old code UPDATEd this one row once per event to set the same
-    // workspaceId, turning one insert into a hundred serial writes.
+    // The old code inserted PENDING then UPDATEd the same row once per event
+    // to set the same workspaceId, turning one insert into a hundred writes.
     expect(mockPrisma.webhookEvent.create).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.webhookEvent.update).not.toHaveBeenCalled();
     expect(mockPrisma.webhookEvent.create.mock.calls[0][0].data.workspaceId).toBe(
       "workspace_1"
     );
   });
 
-  it("does not block the response on the PROCESSED update", async () => {
+  it("records the delivery as PROCESSED, not PENDING", async () => {
     await POST(signedRequest(commentBurst(10)));
 
-    // It may still be written, just not awaited before the 200.
-    const blockingUpdates = mockPrisma.webhookEvent.update.mock.calls.filter(
-      (call) => call[0].data?.status === "PROCESSED"
+    const data = mockPrisma.webhookEvent.create.mock.calls[0][0].data;
+    expect(data.status).toBe("PROCESSED");
+    expect(data.processedAt).toBeInstanceOf(Date);
+  });
+
+  it("finishes the write before responding", async () => {
+    // Marking the row after the response is not guaranteed to run to
+    // completion in a serverless or container runtime — that is what stranded
+    // rows at PENDING in production. Hold the write open and assert the
+    // handler is still waiting on it.
+    let settle: () => void = () => {};
+    mockPrisma.webhookEvent.create.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settle = () => resolve({ id: "we_1" });
+        })
     );
-    expect(blockingUpdates.length).toBeLessThanOrEqual(1);
+
+    let responded = false;
+    const pending = POST(signedRequest(commentBurst(5))).then((r) => {
+      responded = true;
+      return r;
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(responded).toBe(false);
+
+    settle();
+    const response = await pending;
+    expect(response.status).toBe(200);
+  });
+
+  it("records a failed delivery as FAILED with the reason", async () => {
+    mockQueue.addBulk.mockRejectedValue(new Error("redis unavailable"));
+
+    const response = await POST(signedRequest(commentBurst(5)));
+
+    expect(response.status).toBe(500);
+    const data = mockPrisma.webhookEvent.create.mock.calls[0][0].data;
+    expect(data.status).toBe("FAILED");
+    expect(data.errorMessage).toContain("redis unavailable");
   });
 
   it("does the same number of pre-response queries for 1 and 200 comments", async () => {

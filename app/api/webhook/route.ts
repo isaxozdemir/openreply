@@ -104,17 +104,34 @@ export async function POST(request: NextRequest) {
   const workspaceIds = [...new Set(accounts.map((a) => a.workspaceId))];
   const workspaceId = workspaceIds.length === 1 ? workspaceIds[0] : null;
 
-  const webhookEvent = await prisma.webhookEvent.create({
-    data: {
-      workspaceId,
-      object:
-        typeof payload === "object" && payload && "object" in payload
-          ? String(payload.object)
-          : null,
-      payload: payload as Prisma.InputJsonValue,
-      status: "PENDING",
-    },
-  });
+  const objectType =
+    typeof payload === "object" && payload && "object" in payload
+      ? String(payload.object)
+      : null;
+
+  /**
+   * Record the delivery with the outcome it actually had.
+   *
+   * Written once, at the end, rather than inserted PENDING and updated after
+   * the response: work started after the response is not guaranteed to finish
+   * in a serverless or container runtime, which left rows stuck at PENDING
+   * forever. Only FAILED rows are ever read back, so recording the row after
+   * the work — not before it — loses nothing.
+   */
+  const recordDelivery = (
+    status: "PROCESSED" | "FAILED",
+    errorMessage?: string
+  ) =>
+    prisma.webhookEvent.create({
+      data: {
+        workspaceId,
+        object: objectType,
+        payload: payload as Prisma.InputJsonValue,
+        status,
+        errorMessage: errorMessage ?? null,
+        processedAt: new Date(),
+      },
+    });
 
   try {
     const queue = getDMQueue();
@@ -236,41 +253,27 @@ export async function POST(request: NextRequest) {
     }
 
     // Remember which ads a post was boosted into, so the polling sweep can see
-    // comments left on them. Not awaited — the mapping is a sweep optimisation,
-    // and Meta is waiting on this response.
+    // comments left on them. Awaited: work started after the response is not
+    // guaranteed to run to completion. There is at most one distinct pair per
+    // delivery in practice, and recordAdMedia swallows its own failures.
     const adPairs = new Map<string, string>();
     for (const event of commentEvents) {
       if (event.originalMediaId && event.originalMediaId !== event.mediaId) {
-        adPairs.set(`${event.originalMediaId}|${event.mediaId}`, event.mediaId);
+        adPairs.set(event.originalMediaId, event.mediaId);
       }
     }
-    for (const key of adPairs.keys()) {
-      const [originalMediaId, mediaId] = key.split("|");
-      void recordAdMedia(originalMediaId, mediaId);
-    }
+    await Promise.all(
+      [...adPairs.entries()].map(([originalMediaId, mediaId]) =>
+        recordAdMedia(originalMediaId, mediaId)
+      )
+    );
 
-    // The row is inserted PENDING and only ever read back when it is FAILED
-    // (the diagnostics panel) — nothing queries PROCESSED. Marking it costs a
-    // guaranteed extra round trip before the 200, so record the success
-    // without blocking the response Meta is waiting on.
-    void prisma.webhookEvent
-      .update({
-        where: { id: webhookEvent.id },
-        data: { status: "PROCESSED", processedAt: new Date() },
-      })
-      .catch(() => {});
+    await recordDelivery("PROCESSED");
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    await prisma.webhookEvent.update({
-      where: { id: webhookEvent.id },
-      data: {
-        status: "FAILED",
-        errorMessage: message,
-        processedAt: new Date(),
-      },
-    });
+    await recordDelivery("FAILED", message).catch(() => {});
 
     return NextResponse.json(
       { success: false, error: "Webhook processing failed" },
