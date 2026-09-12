@@ -56,4 +56,10 @@ EXPOSE 3000
 # Default to the web process — the worker service overrides this with
 # `command: ["npm", "run", "worker"]` in whatever compose/stack file deploys
 # it (see openreply-vps.stack.yml in EvolutionAPI/omni-nexus for an example).
-CMD ["npm", "run", "start"]
+#
+# `start:migrate` applies pending migrations before serving. The build stage
+# runs `npm run build` (prisma generate + next build), which deliberately does
+# NOT migrate — only Vercel's `vercel-build` did, so a Docker deploy shipped
+# code expecting a schema the database had never been given. Migrations are
+# idempotent, so a redeploy with nothing pending is a no-op.
+CMD ["npm", "run", "start:migrate"]
