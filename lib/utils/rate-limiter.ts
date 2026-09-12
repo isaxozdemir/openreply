@@ -224,3 +224,32 @@ export async function resetRateLimit(
 
 // Export constants for use in tests
 export { RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, REQUEUE_DELAY_MS, MAX_REQUEUE_ATTEMPTS };
+
+/**
+ * Return a previously reserved DM slot to the hourly bucket.
+ *
+ * Called when a send fails after the slot was reserved. Without this, a failed
+ * job permanently consumes quota: a comment retried three times burns three of
+ * the 750 slots while delivering nothing, so the account hits the cap at a
+ * fraction of its real capacity.
+ *
+ * Floors at zero and never creates the key — if the hour rolled over and the
+ * counter expired, there is nothing to give back and we must not resurrect a
+ * stale bucket without a TTL.
+ */
+const RELEASE_DM_SLOT_SCRIPT = `
+local current = tonumber(redis.call("GET", KEYS[1]) or "-1")
+if current <= 0 then
+  return 0
+end
+return redis.call("DECR", KEYS[1])
+`;
+
+export async function releaseDMSlot(
+  instagramAccountId: string
+): Promise<number> {
+  const client = getRedis();
+  const key = `rate:dm:${instagramAccountId}`;
+  const result = await client.eval(RELEASE_DM_SLOT_SCRIPT, 1, key);
+  return toScriptNumber(result);
+}

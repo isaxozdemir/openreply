@@ -1,4 +1,4 @@
-import { Worker, type Job } from "bullmq";
+import { UnrecoverableError, Worker, type Job } from "bullmq";
 import {
   getDMQueue,
   getRedisConnection,
@@ -27,7 +27,7 @@ import {
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
-import { reserveDMSlot } from "@/lib/utils/rate-limiter";
+import { releaseDMSlot, reserveDMSlot } from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
   reserveWorkspaceDMSend,
@@ -39,7 +39,20 @@ import {
   renderMessageWithoutLink,
 } from "@/lib/tracking/message";
 
-const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
+// Retry schedule for transient failures. The first retry is deliberately fast:
+// Meta's "Service temporarily unavailable" (code=2 sub=1545133) usually clears
+// in seconds, and a comment's private-reply window is narrow — waiting five
+// minutes is what turns a recoverable blip into a permanent
+// "invalid for a private reply" on the next attempt. Later retries back off for
+// account-level conditions (throttling, token refresh) that take longer to clear.
+const BACKOFF_DELAYS = [10 * 1000, 2 * 60 * 1000, 15 * 60 * 1000];
+
+// How many jobs the worker sends in parallel. Meta allows 750 private replies
+// per hour per account (~12/second) and the Redis reservation is atomic, so the
+// limiter — not this number — is the real ceiling. Five was far below what a
+// viral post needs, especially since follow-gated campaigns spend an extra
+// round trip on the follow check before every send.
+const WORKER_CONCURRENCY = Number(process.env.DM_WORKER_CONCURRENCY ?? 20);
 
 function formatError(error: unknown): string {
   if (error instanceof MetaApiError) {
@@ -68,6 +81,59 @@ function isTemplateRejection(error: unknown): boolean {
   }
   const message = error instanceof Error ? error.message : "";
   return !NON_TEMPLATE_REJECTIONS.some((pattern) => pattern.test(message));
+}
+
+// Meta error subcodes that no retry can fix. The comment, the thread, or the
+// user is gone, or the private-reply window for that comment has closed — a
+// second and third attempt burn a rate-limit slot and a queue slot each while
+// the outcome stays identical. On a busy post these dead jobs are the bulk of
+// the queue, which is what starves live comments of worker capacity.
+const PERMANENT_SUBCODES = new Set([
+  2534025, // The comment is invalid for a private reply
+  2534014, // The requested user cannot be found
+  2534001, // Thread owner archived/deleted the conversation, or it never existed
+  2534022, // Private reply window expired for this comment
+]);
+
+// Same rejections expressed as text, for errors that arrive without a subcode.
+const PERMANENT_MESSAGES = [
+  /invalid for a private reply/i,
+  /requested user cannot be found/i,
+  /archived or deleted this conversation/i,
+  /outside of allowed window/i,
+];
+
+/**
+ * True when Meta has told us this send will never succeed, so the job should
+ * fail once and stop rather than consume its full retry budget.
+ */
+export function isPermanentSendFailure(error: unknown): boolean {
+  // An expired token or a throttle is an account-level condition that clears.
+  if (error instanceof TokenExpiredError || error instanceof RateLimitError) {
+    return false;
+  }
+  if (error instanceof MetaApiError) {
+    if (error.subcode !== undefined && PERMANENT_SUBCODES.has(error.subcode)) {
+      return true;
+    }
+  }
+  const message = error instanceof Error ? error.message : "";
+  return PERMANENT_MESSAGES.some((pattern) => pattern.test(message));
+}
+
+/**
+ * Wrap an error so BullMQ stops retrying it.
+ *
+ * `UnrecoverableError` keeps the original message — it is what lands in DmLog
+ * and the worker logs — but moves the job straight to `failed` instead of
+ * scheduling another attempt.
+ */
+function asUnrecoverable(error: unknown): Error {
+  const wrapped = new UnrecoverableError(formatError(error));
+  if (error instanceof Error && error.stack) {
+    wrapped.stack = error.stack;
+  }
+  return wrapped;
 }
 
 type WorkerTrackedLink = {
@@ -662,6 +728,19 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         automation.workspaceId,
         usage.periodStart
       );
+      // The hourly Instagram slot was reserved before the send. Nothing was
+      // delivered, so hand it back — otherwise failures silently eat the
+      // account's 750/hour capacity and the cap is hit far below real volume.
+      if (rateLimit.reserved) {
+        await releaseDMSlot(instagramAccountId).catch((releaseError) => {
+          console.error(
+            "[DM Worker] Failed to release DM slot:",
+            formatError(releaseError)
+          );
+        });
+      }
+
+      const permanent = isPermanentSendFailure(error);
 
       await prisma.dmLog.update({
         where: {
@@ -676,7 +755,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage: formatError(error),
         },
       });
-      throw error;
+      throw permanent ? asUnrecoverable(error) : error;
     }
   }
 }
@@ -883,7 +962,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       },
       update: { status: "FAILED", errorMessage: formatError(error) },
     });
-    throw error;
+    throw isPermanentSendFailure(error) ? asUnrecoverable(error) : error;
   }
 }
 
@@ -1181,7 +1260,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           errorMessage: formatError(error),
         },
       });
-      throw error;
+      throw isPermanentSendFailure(error) ? asUnrecoverable(error) : error;
     }
   }
 }
@@ -1250,7 +1329,7 @@ export function createDMWorker(): Worker<DmQueueJob> {
     processJob,
     {
       connection: getRedisConnection(),
-      concurrency: 5,
+      concurrency: WORKER_CONCURRENCY,
       settings: {
         backoffStrategy: (attemptsMade: number) =>
           BACKOFF_DELAYS[Math.min(attemptsMade - 1, BACKOFF_DELAYS.length - 1)],

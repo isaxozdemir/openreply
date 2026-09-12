@@ -12,6 +12,7 @@ const {
   mockDecryptToken,
   mockMatchKeywords,
   mockReserveDMSlot,
+  mockReleaseDMSlot,
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
@@ -45,6 +46,7 @@ const {
   mockDecryptToken: vi.fn(),
   mockMatchKeywords: vi.fn(),
   mockReserveDMSlot: vi.fn(),
+  mockReleaseDMSlot: vi.fn(),
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
@@ -65,14 +67,16 @@ vi.mock("@/lib/meta/client", () => ({
   sendCommentReply: vi.fn(),
   MetaApiError: class MetaApiError extends Error {
     code: number;
+    subcode: number | undefined;
     constructor(
       code: number,
-      _subcode: number | undefined,
+      subcode: number | undefined,
       _fbTraceId: string | undefined,
       message: string
     ) {
       super(message);
       this.code = code;
+      this.subcode = subcode;
       this.name = "MetaApiError";
     }
   },
@@ -94,6 +98,7 @@ vi.mock("@/lib/utils/keyword-matcher", () => ({
 
 vi.mock("@/lib/utils/rate-limiter", () => ({
   reserveDMSlot: mockReserveDMSlot,
+  releaseDMSlot: mockReleaseDMSlot,
 }));
 
 vi.mock("@/lib/billing/usage", () => ({
@@ -123,8 +128,17 @@ vi.mock("bullmq", () => {
       close: vi.fn(),
     };
   }
+  // Mirrors BullMQ's real class: an ordinary Error subclass the queue treats as
+  // "do not retry". Tests assert on the message, which it preserves.
+  class MockUnrecoverableError extends Error {
+    constructor(message?: string) {
+      super(message);
+      this.name = "UnrecoverableError";
+    }
+  }
   return {
     Worker: MockWorker,
+    UnrecoverableError: MockUnrecoverableError,
   };
 });
 
@@ -247,6 +261,7 @@ beforeEach(() => {
     shouldSkip: false,
     reserved: true,
   });
+  mockReleaseDMSlot.mockResolvedValue(10);
   mockReleaseWorkspaceDMReservation.mockResolvedValue({ count: 1 });
   mockSendPrivateReply.mockResolvedValue({
     recipient_id: "commenter_999",
@@ -1114,5 +1129,80 @@ describe("DM Worker — DM keyword trigger", () => {
         create: expect.objectContaining({ status: "FAILED" }),
       })
     );
+  });
+});
+
+describe("DM Worker — retry budget and rate-limit slots", () => {
+  it("stops retrying when Meta reports a permanently undeliverable send", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockSendPrivateReply.mockRejectedValue(
+      new MetaApiError(
+        100,
+        2534025,
+        "trace",
+        "The comment is invalid for a private reply"
+      )
+    );
+
+    const processor = getProcessor();
+    const error = await processor(createMockJob()).catch((e) => e);
+
+    // UnrecoverableError is what tells BullMQ to skip the remaining attempts.
+    // Without it each dead comment burns three attempts and three slots.
+    expect(error.name).toBe("UnrecoverableError");
+    expect(error.message).toContain("invalid for a private reply");
+  });
+
+  it("keeps retrying a transient Meta outage", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockSendPrivateReply.mockRejectedValue(
+      new MetaApiError(2, 1545133, "trace", "Service temporarily unavailable")
+    );
+
+    const processor = getProcessor();
+    const error = await processor(createMockJob()).catch((e) => e);
+
+    expect(error.name).not.toBe("UnrecoverableError");
+    expect(error.message).toContain("Service temporarily unavailable");
+  });
+
+  it("returns the hourly Instagram slot when a send fails", async () => {
+    mockSendPrivateReply.mockRejectedValue(new Error("Meta is down"));
+
+    const processor = getProcessor();
+    await expect(processor(createMockJob())).rejects.toThrow("Meta is down");
+
+    // The slot was reserved before the send; nothing was delivered, so the
+    // account's 750/hour capacity must not be consumed by the failure.
+    expect(mockReleaseDMSlot).toHaveBeenCalledWith("ig_456");
+  });
+
+  it("does not return a slot that was never reserved", async () => {
+    mockReserveDMSlot.mockResolvedValue({
+      allowed: false,
+      currentCount: 750,
+      remainingDMs: 0,
+      shouldRequeue: false,
+      requeueDelayMs: 0,
+      shouldSkip: true,
+      reserved: false,
+    });
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockReleaseDMSlot).not.toHaveBeenCalled();
+  });
+
+  it("keeps the slot when the send succeeds", async () => {
+    mockSendPrivateReply.mockResolvedValue({
+      recipient_id: "r",
+      message_id: "m",
+    });
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockReleaseDMSlot).not.toHaveBeenCalled();
   });
 });
