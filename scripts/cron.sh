@@ -65,6 +65,9 @@ while true; do
     last_daily="$today"
     call refresh-tokens
     call snapshot-followers
+    # Retention sweep. Without it WebhookEvent alone grows by one full Meta
+    # payload per delivery until the volume fills and Postgres refuses writes.
+    call prune-records
   fi
 
   # Half a minute: short enough never to skip a slot, long enough to stay idle.
