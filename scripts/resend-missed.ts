@@ -12,8 +12,15 @@
  *   - subcode 2534014, "user cannot be found" — the account is gone
  *   - anyone with no evidence of an open conversation
  *
- * Meta's 24-hour messaging window still applies and is not visible from here,
- * so expect some sends to be refused; those are reported, not retried.
+ * Meta's 24-hour messaging window still applies and is NOT visible from here.
+ * In practice this is the binding constraint: a first run against a campaign
+ * whose failures were days old had all ten sends refused with subcode 2534022,
+ * "outside of allowed window". The window counts from the person's last message
+ * to the account, so this script only helps while the failure is recent — hours,
+ * not days. Run it soon after a botched batch; by the next day it is too late
+ * and there is no way to reopen the window from our side.
+ *
+ * Refusals are reported per subcode, never retried.
  *
  * Usage:
  *   npx tsx scripts/resend-missed.ts --campaign <automationId>           # dry run
@@ -40,6 +47,12 @@ const AUTOMATION_ID = arg("campaign");
 const SEND = process.argv.includes("--send");
 const LIMIT = Number(arg("limit") ?? 100);
 const DELAY_MS = Number(arg("delay") ?? 1500);
+// Prepended to the campaign message. These people commented a while ago and
+// got nothing, so the DM arrives unprompted and out of the blue — the apology
+// is what makes it read as a fix rather than as spam.
+const PREFIX =
+  arg("prefix") ??
+  "Kusura bakma, bir aksaklık yüzünden programı sana gönderemedik. İşte programın:";
 
 // "User cannot be found" — the Instagram account no longer exists, so there is
 // nobody to message. Every other failure is worth an attempt.
@@ -109,12 +122,26 @@ async function main() {
 
   const targets = [...candidates.entries()].slice(0, LIMIT);
 
+  const newest = failed[0]?.createdAt;
+  const ageHours = newest
+    ? Math.round((Date.now() - newest.getTime()) / 3_600_000)
+    : null;
+
   console.log(`Campaign      : ${automation.name}`);
   console.log(`Failed rows   : ${failed.length}`);
+  if (ageHours !== null) {
+    console.log(
+      `Newest failure: ${ageHours}h ago` +
+        (ageHours > 24
+          ? "  ⚠ past Meta's 24h window — expect every send to be refused"
+          : "")
+    );
+  }
   console.log(`Already sent  : ${deliveredIds.size} people (skipped)`);
   console.log(`Reachable     : ${candidates.size} people`);
   console.log(`This run      : ${targets.length} (limit ${LIMIT})`);
-  console.log(`Mode          : ${SEND ? "SENDING" : "DRY RUN"}\n`);
+  console.log(`Mode          : ${SEND ? "SENDING" : "DRY RUN"}`);
+  console.log(`Prefix        : ${PREFIX}\n`);
 
   if (!SEND) {
     for (const [id, info] of targets.slice(0, 20)) {
@@ -127,15 +154,22 @@ async function main() {
 
   let sent = 0;
   const failures = new Map<string, number>();
+  // Once the window has closed it has closed for everyone in the batch, so a
+  // run of consecutive "outside of allowed window" refusals means the rest are
+  // hopeless too. Stop rather than spend hundreds of requests proving it.
+  const WINDOW_SUBCODE = "2534022";
+  const GIVE_UP_AFTER = 10;
+  let consecutiveWindowRefusals = 0;
 
   for (const [userId, info] of targets) {
     try {
       if (automation.trackedLinks.length > 0) {
-        const bodyText =
+        const bodyText = `${PREFIX}\n\n${
           renderMessageWithoutLink({
             message: automation.dmMessage,
             commenterName: info.commenterName,
-          }) || "Here's your link:";
+          }) || "İşte linkin:"
+        }`;
         const buttons = automation.trackedLinks.slice(0, 3).map((link, index) => ({
           url: buildTrackedUrl(link.slug),
           title:
@@ -155,11 +189,11 @@ async function main() {
           accessToken,
           automation.instagramAccount.instagramId,
           userId,
-          renderMessageWithTracking({
+          `${PREFIX}\n\n${renderMessageWithTracking({
             message: automation.dmMessage,
             commenterName: info.commenterName,
             trackedLinks: automation.trackedLinks,
-          })
+          })}`
         );
       }
 
@@ -179,12 +213,23 @@ async function main() {
       });
 
       sent++;
+      consecutiveWindowRefusals = 0;
       console.log(`  ✓ @${info.commenterName ?? userId}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       const subcode = message.match(/sub=(\d+)/)?.[1] ?? "other";
       failures.set(subcode, (failures.get(subcode) ?? 0) + 1);
       console.log(`  ✗ @${info.commenterName ?? userId} — ${message.slice(0, 90)}`);
+
+      consecutiveWindowRefusals =
+        subcode === WINDOW_SUBCODE ? consecutiveWindowRefusals + 1 : 0;
+      if (consecutiveWindowRefusals >= GIVE_UP_AFTER) {
+        console.log(
+          `\nStopping: ${GIVE_UP_AFTER} consecutive sends refused as outside the ` +
+            `24-hour window. These conversations cannot be reopened from here.`
+        );
+        break;
+      }
     }
 
     // Meta allows 750 private replies an hour; plain DMs are not the same
