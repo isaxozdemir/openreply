@@ -877,6 +877,14 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   // real follower is never trapped.
   if ((isFollowCheck || fallback) && automation.requireFollow) {
     const follows = await getUserFollowStatus(accessToken, userId);
+    if (follows === null) {
+      // Fail-open, as the comment above describes — but say so, otherwise a
+      // link delivered on an unverifiable status is indistinguishable in the
+      // logs from one delivered to a confirmed follower.
+      console.log(
+        `[DM Worker] Follow gate: ${userId} status unverifiable, delivering anyway (automation ${automation.id}, ${isFollowCheck ? "tap" : "fallback"})`
+      );
+    }
     if (follows === false) {
       if (fallback) return;
       const promptText = renderMessageWithoutLink({
@@ -887,9 +895,24 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       });
       // Re-prompting leaves no DmLog row of its own, so without this line a
       // user stuck behind the gate is invisible: they tapped, Meta said they
-      // do not follow, and the dashboard shows nothing at all.
+      // do not follow, and the dashboard shows nothing at all. The tap count
+      // separates the two explanations for a user who insists they follow: a
+      // first tap that Meta has not caught up with yet, versus the same person
+      // bouncing off the gate over and over, which means the field is wrong for
+      // this account rather than merely lagging. A blocked tap writes no DmLog
+      // row, so the count lives in Redis, expiring after a week — long enough
+      // to see a pattern, short enough to not accumulate.
+      let blockedTaps = 0;
+      try {
+        const redis = getRedisConnection();
+        const key = `followgate:blocked:${automation.id}:${userId}`;
+        blockedTaps = await redis.incr(key);
+        if (blockedTaps === 1) await redis.expire(key, 7 * 24 * 60 * 60);
+      } catch {
+        // Counting is diagnostic only — never let it stop the re-prompt.
+      }
       console.log(
-        `[DM Worker] Follow gate: ${userId} tapped but Meta reports not following (automation ${automation.id})`
+        `[DM Worker] Follow gate: ${userId} tapped but Meta reports not following (automation ${automation.id}, blocked taps: ${blockedTaps})`
       );
       try {
         await sendDirectMessageWithButton(

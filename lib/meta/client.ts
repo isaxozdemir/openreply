@@ -268,17 +268,64 @@ export async function getUserFollowStatus(
   const url = new URL(`${instagramGraphBase()}/${recipientId}`);
   url.searchParams.set("fields", "is_user_follow_business");
 
+  // Every non-true outcome here decides whether a real follower gets their
+  // link, so each one is logged with the reason it happened. Without this an
+  // HTTP failure, a missing field and a genuine "not following" are all just
+  // `null`/`false` at the call site, and a user reporting "i follow but got
+  // nothing" cannot be told apart from a user who simply does not follow.
   try {
     const response = await fetch(url.toString(), {
       method: "GET",
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!response.ok) return null;
-    const data = await response.json();
-    return typeof data?.is_user_follow_business === "boolean"
-      ? data.is_user_follow_business
-      : null;
-  } catch {
+
+    const body = await response.text();
+
+    if (!response.ok) {
+      console.warn(
+        `[Instagram] follow check unavailable for ${recipientId}: HTTP ${response.status} ${body.slice(0, 300)}`
+      );
+      return null;
+    }
+
+    let data: unknown;
+    try {
+      data = JSON.parse(body);
+    } catch {
+      console.warn(
+        `[Instagram] follow check returned non-JSON for ${recipientId}: ${body.slice(0, 300)}`
+      );
+      return null;
+    }
+
+    const value = (data as { is_user_follow_business?: unknown })
+      ?.is_user_follow_business;
+
+    if (typeof value !== "boolean") {
+      // The field is omitted when the app lacks the permission, or when the
+      // user is not in an active conversation. Both read as "unverifiable",
+      // and each caller applies its own fail-open/fail-closed rule.
+      console.warn(
+        `[Instagram] follow check field missing for ${recipientId}: ${body.slice(0, 300)}`
+      );
+      return null;
+    }
+
+    if (value === false) {
+      // Meta answered, and the answer was no. Logged because a user who does
+      // follow and still lands here is the signal that this field is lagging
+      // behind (or wrong for this account) rather than the gate working.
+      console.log(
+        `[Instagram] follow check says ${recipientId} does not follow the account`
+      );
+    }
+
+    return value;
+  } catch (error) {
+    console.warn(
+      `[Instagram] follow check request failed for ${recipientId}:`,
+      error instanceof Error ? error.message : error
+    );
     return null;
   }
 }
