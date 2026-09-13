@@ -24,11 +24,14 @@
  * with subcode 2534022, which is exactly what a run against this campaign hit:
  * 39 "open" conversations, ten sends, ten refusals.
  *
- * --human-agent is the one way past it. Meta's HUMAN_AGENT tag extends the
- * window to 7 days for a message a person has decided to send, one at a time,
- * to resolve something — an apology-and-deliver run like this one. It is not
- * for automation: the worker never sends it, and tagging routine campaign
- * traffic this way violates Meta's policy and risks the account.
+ * --human-agent uses Meta's HUMAN_AGENT tag, which extends the window to 7 days
+ * for a message a person has decided to send, one at a time, to resolve
+ * something. IT REQUIRES META APP REVIEW: without the approved feature every
+ * send is refused with "To use 'Human Agent', your use of this endpoint must be
+ * reviewed and approved by Facebook", and the flag is useless. Check that the
+ * app has it before relying on this for a recovery. It is never for automation:
+ * the worker does not send it, and tagging routine campaign traffic this way
+ * violates Meta's policy and risks the account.
  *
  * Refusals are reported per subcode, never retried.
  *
@@ -293,6 +296,7 @@ async function main() {
   }
 
   let sent = 0;
+  let humanAgentUnapproved = false;
   const failures = new Map<string, number>();
   // Once the window has closed it has closed for everyone in the batch, so a
   // run of consecutive "outside of allowed window" refusals means the rest are
@@ -375,6 +379,18 @@ async function main() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       const subcode = message.match(/sub=(\d+)/)?.[1] ?? "other";
+      // Meta gates the tag behind app review, and says so in plain text with no
+      // subcode. Without this the run reports 70 × "sub=other" and reads like a
+      // mystery rather than one missing permission.
+      if (/Human Agent/i.test(message) && !humanAgentUnapproved) {
+        humanAgentUnapproved = true;
+        console.log(
+          "\n  ⚠ This app is not approved for the HUMAN_AGENT tag, so every\n" +
+            "    --human-agent send will be refused. Request the Human Agent\n" +
+            "    feature in the Meta app dashboard, or drop the flag and accept\n" +
+            "    the 24-hour window.\n"
+        );
+      }
       failures.set(subcode, (failures.get(subcode) ?? 0) + 1);
       console.log(`  ✗ @${info.commenterName ?? userId} — ${message.slice(0, 90)}`);
 
