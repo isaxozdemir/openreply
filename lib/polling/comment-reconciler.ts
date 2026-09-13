@@ -39,9 +39,16 @@ import { matchKeywords } from "@/lib/utils/keyword-matcher";
 // Only consider comments from the last few days — older ones are outside
 // Instagram's private-reply window anyway, so a DM to them would just fail.
 const LOOKBACK_HOURS = Number(process.env.COMMENT_POLL_LOOKBACK_HOURS ?? 72);
-// Hard cap on how many new comments a single campaign can enqueue per sweep, so
-// a viral post drains gradually instead of bursting into the comment API.
-const MAX_NEW_PER_SWEEP = Number(process.env.COMMENT_POLL_MAX_PER_SWEEP ?? 30);
+// Hard cap on how many new comments a single campaign can enqueue per sweep.
+//
+// This limits ENQUEUEING, not sending: the rate limiter decides how fast the
+// queue actually drains, so a high cap here cannot burst past Meta's limits.
+// At 30 per sweep and a 5-minute interval the reconciler could only pick up
+// 360 comments an hour, which on a post drawing 2400 means the ones webhooks
+// missed pile up faster than the sweep can collect them — and each one has a
+// 7-day reply window quietly running down. 300 covers a viral hour with the
+// queue, not the sweep, doing the pacing.
+const MAX_NEW_PER_SWEEP = Number(process.env.COMMENT_POLL_MAX_PER_SWEEP ?? 300);
 // For "any post" campaigns, how many recent posts to scan.
 const RECENT_MEDIA_LIMIT = 10;
 
