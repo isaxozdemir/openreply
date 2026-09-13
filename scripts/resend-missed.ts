@@ -216,7 +216,12 @@ async function main() {
   for (const row of everyone) {
     // The thank-you follow-up is not the link; a failure there says nothing
     // about whether they got it.
-    if (row.commentId.startsWith("followup:")) continue;
+    if (
+      row.commentId.startsWith("followup:") ||
+      row.commentId.startsWith("gate:")
+    ) {
+      continue;
+    }
     // `deliveredIds` is keyed on a SENT reveal row, so this is the real test of
     // "already has the link" — a SENT prompt does not count.
     if (deliveredIds.has(row.commenterId)) continue;

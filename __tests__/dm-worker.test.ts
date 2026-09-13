@@ -1225,6 +1225,44 @@ describe("DM Worker — follow gate when Meta will not answer", () => {
   });
 });
 
+describe("DM Worker — a blocked follow gate leaves a record", () => {
+  it("writes a SKIPPED_FOLLOW_GATE row under its own key, not the reveal key", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue({
+      ...mockAutomation,
+      requireFollow: true,
+    });
+    mockGetUserFollowStatus.mockResolvedValue(false);
+
+    const processor = getProcessor();
+    await processor({
+      name: "process-postback",
+      data: {
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "followcheck:automation_123",
+      },
+      id: "postback_gate",
+      attemptsMade: 0,
+    });
+
+    // The prompt goes out again...
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalled();
+    // ...and the block is recorded, so the person is no longer invisible.
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          automationId_commentId: expect.objectContaining({
+            commentId: "gate:commenter_999",
+          }),
+        }),
+        create: expect.objectContaining({
+          status: "SKIPPED_FOLLOW_GATE",
+        }),
+      })
+    );
+  });
+});
+
 describe("DM Worker — retry budget and rate-limit slots", () => {
   it("stops retrying when Meta reports a permanently undeliverable send", async () => {
     const { MetaApiError } = await import("@/lib/meta/client");

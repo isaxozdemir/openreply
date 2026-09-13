@@ -71,7 +71,12 @@ async function main() {
 
     for (const row of rows) {
       // The thank-you is not the link, in either direction.
-      if (row.commentId.startsWith("followup:")) continue;
+      if (
+        row.commentId.startsWith("followup:") ||
+        row.commentId.startsWith("gate:")
+      ) {
+        continue;
+      }
 
       people.add(row.commenterId);
       if (row.status === "SENT" && row.commentId.startsWith("reveal:")) {

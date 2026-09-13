@@ -937,6 +937,39 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       console.log(
         `[DM Worker] Follow gate: ${userId} tapped but Meta reports not following (automation ${automation.id}, blocked taps: ${blockedTaps})`
       );
+      // Record the block. Until this existed a gate-stopped person left no row
+      // of any kind — their prompt was logged SENT and nothing said the link
+      // never followed — which is why 1037 of them went unnoticed for a week
+      // and why every recovery script had to reconstruct them by inference.
+      await prisma.dmLog
+        .upsert({
+          where: {
+            automationId_commentId: {
+              automationId: automation.id,
+              commentId: `gate:${userId}`,
+            },
+          },
+          create: {
+            workspaceId: automation.workspaceId,
+            automationId: automation.id,
+            instagramAccountId: automation.instagramAccountId,
+            commenterId: userId,
+            commenterName,
+            commentText: "(follow gate)",
+            commentId: `gate:${userId}`,
+            status: "SKIPPED_FOLLOW_GATE",
+            attempts: blockedTaps,
+            errorMessage: `Meta reports not following; prompted ${blockedTaps}x`,
+          },
+          update: {
+            status: "SKIPPED_FOLLOW_GATE",
+            attempts: blockedTaps,
+            errorMessage: `Meta reports not following; prompted ${blockedTaps}x`,
+          },
+        })
+        .catch(() => {
+          // Diagnostic only — never block the re-prompt.
+        });
       try {
         await sendDirectMessageWithButton(
           accessToken,

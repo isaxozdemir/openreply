@@ -96,7 +96,12 @@ async function main() {
     for (const row of rows) {
       // A `followup:` row is the thank-you message, not the link. It must never
       // count as delivery, and its failure must never count as a lost link.
-      if (row.commentId.startsWith("followup:")) continue;
+      if (
+        row.commentId.startsWith("followup:") ||
+        row.commentId.startsWith("gate:")
+      ) {
+        continue;
+      }
       const isReveal = row.commentId.startsWith("reveal:");
       if (row.status === "SENT") {
         anySent.add(row.commenterId);

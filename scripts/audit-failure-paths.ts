@@ -30,6 +30,8 @@ function arg(name: string): string | undefined {
 function pathOf(commentId: string): string {
   if (commentId.startsWith("reveal:")) return "reveal (button tap)";
   if (commentId.startsWith("dm:")) return "dm (keyword trigger)";
+  if (commentId.startsWith("gate:")) return "follow gate (blocked)";
+  if (commentId.startsWith("followup:")) return "follow-up (thank-you)";
   return "comment (private reply)";
 }
 

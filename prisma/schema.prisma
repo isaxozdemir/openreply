@@ -385,6 +385,10 @@ enum DmStatus {
   SKIPPED_RATE_LIMIT
   SKIPPED_PLAN_LIMIT
   SKIPPED_NO_MATCH
+  // Stopped by the follow gate: the prompt went out, the link did not. Without
+  // its own status these people were invisible — their prompt was logged SENT,
+  // and nothing recorded that the link never followed.
+  SKIPPED_FOLLOW_GATE
 }
 
 enum WebhookStatus {

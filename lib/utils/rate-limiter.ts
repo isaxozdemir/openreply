@@ -11,12 +11,21 @@
  *
  * Note this is a hard ceiling with no headroom. If Meta throttles before the
  * documented limit, or other calls on the same account share the bucket, lower
- * this value.
+ * it with DM_RATE_LIMIT_MAX.
+ *
+ * 750 is what the API permits, not what is necessarily wise. Practitioner
+ * guidance for comment-to-DM automation converges on roughly 200/hour, on the
+ * grounds that a burst is what draws attention to an account even when every
+ * individual call is inside the documented cap. A viral post is exactly when
+ * both facts apply at once, so the ceiling is configurable and the queue
+ * requeues rather than dropping anything when it is reached.
  */
 
 import Redis from "ioredis";
 
-const RATE_LIMIT_MAX = 750; // private replies per hour, per Meta's documented cap
+const RATE_LIMIT_MAX = Number(
+  process.env.DM_RATE_LIMIT_MAX ?? 750
+); // private replies per hour; Meta documents 750
 const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
 const REQUEUE_DELAY_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_REQUEUE_ATTEMPTS = 3;
