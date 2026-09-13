@@ -13,6 +13,7 @@ import {
 } from "./client";
 import { prisma } from "@/lib/db/client";
 import {
+  FOLLOW_STATUS_NO_CONSENT,
   MetaApiError,
   RateLimitError,
   TokenExpiredError,
@@ -653,7 +654,18 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     let sendFollowPrompt = false;
     if (automation.requireFollow && !useOpeningDm) {
       const alreadyFollows = await getUserFollowStatus(accessToken, commenterId);
-      sendFollowPrompt = alreadyFollows !== true;
+      // No consent means Meta will not answer for this person at all, not that
+      // they do not follow. Prompting them anyway puts a real follower in a
+      // loop with no way out, since tapping the button runs the same refused
+      // check again — so deliver, and let the prompt be for answered "no"s.
+      sendFollowPrompt =
+        alreadyFollows !== true &&
+        alreadyFollows !== FOLLOW_STATUS_NO_CONSENT;
+      if (alreadyFollows === FOLLOW_STATUS_NO_CONSENT) {
+        console.log(
+          `[DM Worker] Follow gate: ${commenterId} has not consented to a profile read, delivering without a follow check (automation ${automation.id}, comment)`
+        );
+      }
     }
 
     try {
@@ -877,12 +889,16 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   // real follower is never trapped.
   if ((isFollowCheck || fallback) && automation.requireFollow) {
     const follows = await getUserFollowStatus(accessToken, userId);
-    if (follows === null) {
+    if (follows !== true && follows !== false) {
       // Fail-open, as the comment above describes — but say so, otherwise a
       // link delivered on an unverifiable status is indistinguishable in the
       // logs from one delivered to a confirmed follower.
+      const reason =
+        follows === FOLLOW_STATUS_NO_CONSENT
+          ? "no consent for a profile read"
+          : "status unverifiable";
       console.log(
-        `[DM Worker] Follow gate: ${userId} status unverifiable, delivering anyway (automation ${automation.id}, ${isFollowCheck ? "tap" : "fallback"})`
+        `[DM Worker] Follow gate: ${userId} ${reason}, delivering anyway (automation ${automation.id}, ${isFollowCheck ? "tap" : "fallback"})`
       );
     }
     if (follows === false) {
@@ -1220,7 +1236,15 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
     let sendFollowPrompt = false;
     if (automation.requireFollow) {
       const follows = await getUserFollowStatus(accessToken, senderId);
-      sendFollowPrompt = follows !== true;
+      // Same exception as the comment path: a refused profile read (no consent)
+      // is not a "no". Everything else still fails closed here, as above.
+      sendFollowPrompt =
+        follows !== true && follows !== FOLLOW_STATUS_NO_CONSENT;
+      if (follows === FOLLOW_STATUS_NO_CONSENT) {
+        console.log(
+          `[DM Worker] Follow gate: ${senderId} has not consented to a profile read, delivering without a follow check (automation ${automation.id}, dm)`
+        );
+      }
     }
 
     const usage = await reserveWorkspaceDMSend(automation.workspaceId);

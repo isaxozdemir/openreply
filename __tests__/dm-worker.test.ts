@@ -57,6 +57,9 @@ vi.mock("@/lib/db/client", () => ({
 }));
 
 vi.mock("@/lib/meta/client", () => ({
+  // Must match the real constant in lib/meta/client.ts — the worker compares
+  // against it by value.
+  FOLLOW_STATUS_NO_CONSENT: "no_consent",
   sendPrivateReply: mockSendPrivateReply,
   sendPrivateReplyWithLinkButton: mockSendPrivateReplyWithLinkButton,
   sendPrivateReplyWithButton: mockSendPrivateReplyWithButton,
@@ -1129,6 +1132,96 @@ describe("DM Worker — DM keyword trigger", () => {
         create: expect.objectContaining({ status: "FAILED" }),
       })
     );
+  });
+});
+
+describe("DM Worker — follow gate when Meta will not answer", () => {
+  // Meta refuses the profile read with code 230 ("User consent is required")
+  // for people who have not messaged the account. It says nothing about whether
+  // they follow, so it must not be read as "not following" — doing so traps a
+  // real follower in a prompt loop, because tapping the button runs the same
+  // refused check again.
+  const gatedAutomation = {
+    ...mockAutomation,
+    requireFollow: true,
+    openingDmEnabled: false,
+    openingDmMessage: null,
+  };
+
+  it("delivers the link on a comment when consent is missing", async () => {
+    const { FOLLOW_STATUS_NO_CONSENT } = await import("@/lib/meta/client");
+    mockPrisma.automation.findMany.mockResolvedValue([gatedAutomation]);
+    mockGetUserFollowStatus.mockResolvedValue(FOLLOW_STATUS_NO_CONSENT);
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      expect.any(String),
+      "Hey commenter_user! Here is the link: https://example.com"
+    );
+    // The follow prompt is for an answered "no", not for an unanswerable check.
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+  });
+
+  it("still prompts on a comment when Meta answers that they do not follow", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([gatedAutomation]);
+    mockGetUserFollowStatus.mockResolvedValue(false);
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalled();
+  });
+
+  it("delivers the link on a DM trigger when consent is missing", async () => {
+    const { FOLLOW_STATUS_NO_CONSENT } = await import("@/lib/meta/client");
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...gatedAutomation, dmTriggerEnabled: true },
+    ]);
+    mockGetUserFollowStatus.mockResolvedValue(FOLLOW_STATUS_NO_CONSENT);
+
+    const processor = getProcessor();
+    await processor({
+      name: "process-message",
+      data: {
+        instagramAccountId: "ig_456",
+        messageId: "mid_consent",
+        messageText: "can I get the LINK?",
+        senderId: "commenter_999",
+      },
+      id: "message_job_consent",
+      attemptsMade: 0,
+    });
+
+    expect(mockSendDirectMessage).toHaveBeenCalled();
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  it("still prompts on a DM trigger when Meta answers that they do not follow", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...gatedAutomation, dmTriggerEnabled: true },
+    ]);
+    mockGetUserFollowStatus.mockResolvedValue(false);
+
+    const processor = getProcessor();
+    await processor({
+      name: "process-message",
+      data: {
+        instagramAccountId: "ig_456",
+        messageId: "mid_notfollowing",
+        messageText: "can I get the LINK?",
+        senderId: "commenter_999",
+      },
+      id: "message_job_notfollowing",
+      attemptsMade: 0,
+    });
+
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalled();
   });
 });
 

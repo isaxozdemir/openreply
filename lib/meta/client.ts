@@ -255,16 +255,29 @@ export async function sendDirectMessageWithButton(
 }
 
 /**
+ * Returned when Meta refuses the profile read for lack of user consent
+ * (error code 230). Distinct from `null` — which means the status could not be
+ * established for some other reason — because consent is a settled state that
+ * no retry clears, and it carries no information about whether the person
+ * follows. A gate that treats it as "not following" traps real followers in a
+ * prompt loop, so callers fail open on it.
+ */
+export const FOLLOW_STATUS_NO_CONSENT = "no_consent" as const;
+
+export type FollowStatus = boolean | null | typeof FOLLOW_STATUS_NO_CONSENT;
+
+/**
  * Check whether a user (by their IGSID) follows the business account, via the
  * Instagram Messaging profile API. Available for users in an active
  * conversation (e.g. after a private reply or a button tap). Returns true or
- * false, or `null` when Meta does not return the field — so callers can decide
- * how to treat the unverifiable case.
+ * false, `FOLLOW_STATUS_NO_CONSENT` when Meta has no consent to answer, or
+ * `null` when the status is otherwise unverifiable — so callers can decide how
+ * to treat each case.
  */
 export async function getUserFollowStatus(
   accessToken: string,
   recipientId: string
-): Promise<boolean | null> {
+): Promise<FollowStatus> {
   const url = new URL(`${instagramGraphBase()}/${recipientId}`);
   url.searchParams.set("fields", "is_user_follow_business");
 
@@ -282,6 +295,17 @@ export async function getUserFollowStatus(
     const body = await response.text();
 
     if (!response.ok) {
+      // Meta returns code 230 ("User consent is required to access user
+      // profile") with HTTP 500, as though it were a server fault. It is not:
+      // it is a settled state, and it says nothing about whether the person
+      // follows. Reported separately so the gate can tell it apart from a real
+      // outage — see FOLLOW_STATUS_NO_CONSENT.
+      if (body.includes('"code":230')) {
+        console.warn(
+          `[Instagram] follow check has no consent for ${recipientId} (code 230): ${body.slice(0, 300)}`
+        );
+        return FOLLOW_STATUS_NO_CONSENT;
+      }
       console.warn(
         `[Instagram] follow check unavailable for ${recipientId}: HTTP ${response.status} ${body.slice(0, 300)}`
       );
