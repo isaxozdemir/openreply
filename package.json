@@ -16,6 +16,7 @@
     "check-follow-gate": "tsx scripts/check-follow-gate.ts",
     "audit-undelivered": "tsx scripts/audit-undelivered.ts",
     "check-reachable": "tsx scripts/check-reachable.ts",
+    "audit-failures": "tsx scripts/audit-failures.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
