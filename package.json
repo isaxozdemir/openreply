@@ -19,6 +19,7 @@
     "audit-failures": "tsx scripts/audit-failures.ts",
     "audit-failure-paths": "tsx scripts/audit-failure-paths.ts",
     "report-campaign": "tsx scripts/report-campaign.ts",
+    "count-open-threads": "tsx scripts/count-open-threads.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
