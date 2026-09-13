@@ -27,8 +27,23 @@ const RATE_LIMIT_MAX = Number(
   process.env.DM_RATE_LIMIT_MAX ?? 750
 ); // private replies per hour; Meta documents 750
 const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
-const REQUEUE_DELAY_MS = 30 * 60 * 1000; // 30 minutes
-const MAX_REQUEUE_ATTEMPTS = 3;
+// How long a job waits before trying for a slot again. The window is a rolling
+// hour, so slots free up continuously rather than all at once — waiting half an
+// hour to retry leaves capacity idle while a backlog sits behind it. Ten
+// minutes keeps the queue moving without hammering Redis.
+const REQUEUE_DELAY_MS = Number(
+  process.env.DM_REQUEUE_DELAY_MS ?? 10 * 60 * 1000
+);
+// How many times a job waits for a free slot before it is dropped.
+//
+// This is the drain budget, and it has to be read against the send rate. At
+// 3 attempts × 30 minutes a job gives up after 1.5 hours; at 200 sends/hour
+// that covers ~300 people, so a post drawing 2400 comments would have most of
+// them discarded while still well inside Instagram's 7-day private-reply
+// window. Twelve attempts covers a full 6 hours of backlog, which drains 2400
+// at 200/hour with room to spare — and costs nothing when there is no backlog,
+// since a job that gets a slot never requeues at all.
+const MAX_REQUEUE_ATTEMPTS = Number(process.env.DM_MAX_REQUEUE_ATTEMPTS ?? 12);
 
 let redis: Redis | null = null;
 

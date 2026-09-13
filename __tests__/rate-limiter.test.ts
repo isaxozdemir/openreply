@@ -32,6 +32,7 @@ import {
   incrementDMCounter,
   reserveDMSlot,
   RATE_LIMIT_MAX,
+  MAX_REQUEUE_ATTEMPTS,
 } from "../lib/utils/rate-limiter";
 
 beforeEach(() => {
@@ -75,7 +76,7 @@ describe("checkRateLimit", () => {
   it("should skip after max requeue attempts", async () => {
     mockGet.mockResolvedValue(String(RATE_LIMIT_MAX));
 
-    const result = await checkRateLimit("account_123", 3);
+    const result = await checkRateLimit("account_123", MAX_REQUEUE_ATTEMPTS);
 
     expect(result.allowed).toBe(false);
     expect(result.shouldRequeue).toBe(false);
@@ -116,7 +117,7 @@ describe("reserveDMSlot", () => {
   it("should skip after max requeue attempts", async () => {
     mockEval.mockResolvedValue(["0", String(RATE_LIMIT_MAX), "0"]);
 
-    const result = await reserveDMSlot("account_123", 3);
+    const result = await reserveDMSlot("account_123", MAX_REQUEUE_ATTEMPTS);
 
     expect(result.allowed).toBe(false);
     expect(result.shouldRequeue).toBe(false);
