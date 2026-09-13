@@ -14,6 +14,7 @@
     "worker": "tsx worker/dm-worker.ts",
     "resend-missed": "tsx scripts/resend-missed.ts",
     "check-follow-gate": "tsx scripts/check-follow-gate.ts",
+    "audit-undelivered": "tsx scripts/audit-undelivered.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
