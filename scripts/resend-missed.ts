@@ -7,8 +7,13 @@
  * prompt, a normal direct message is allowed even though the comment's single
  * private reply is long gone. Those are the people this reaches.
  *
+ * Who it covers: everyone with no `reveal:` row — both sends that failed and
+ * people the follow gate stopped. The latter have no failed row at all (their
+ * prompt is logged SENT, and nothing records that the link never followed), so
+ * selecting on FAILED alone silently skipped every one of them.
+ *
  * Who is deliberately NOT included:
- *   - anyone already SENT (they have the link)
+ *   - anyone with a SENT reveal row (they have the link)
  *   - subcode 2534014, "user cannot be found" — the account is gone
  *   - anyone with no evidence of an open conversation
  *
@@ -32,6 +37,7 @@
 import { prisma } from "@/lib/db/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { sendDirectMessage, sendDirectMessageWithLinkButton } from "@/lib/meta/client";
+import { getMetaGraphApiVersion } from "@/lib/env";
 import {
   buildTrackedUrl,
   renderMessageWithTracking,
@@ -57,6 +63,61 @@ const PREFIX =
 // "User cannot be found" — the Instagram account no longer exists, so there is
 // nobody to message. Every other failure is worth an attempt.
 const HOPELESS_SUBCODE = "2534014";
+
+/**
+ * IGSIDs whose conversation Meta still shows as active within 24 hours — the
+ * only people a send can actually reach. Conversations come back newest-first,
+ * so the walk stops at the first one past the window. Returns null if the read
+ * fails, so the caller can fall back rather than treat "unknown" as "closed".
+ */
+async function fetchOpenConversationIds(
+  accessToken: string,
+  igUserId: string
+): Promise<Set<string> | null> {
+  const open = new Set<string>();
+  const windowMs = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  const first = new URL(
+    `https://graph.instagram.com/${getMetaGraphApiVersion()}/${igUserId}/conversations`
+  );
+  first.searchParams.set("platform", "instagram");
+  first.searchParams.set("fields", "id,updated_time,participants");
+  first.searchParams.set("limit", "100");
+  first.searchParams.set("access_token", accessToken);
+
+  let url: string | null = first.toString();
+  let pages = 0;
+
+  while (url && pages < 20) {
+    const response: Response = await fetch(url);
+    if (!response.ok) return open.size > 0 ? open : null;
+
+    const parsed = JSON.parse(await response.text()) as {
+      data?: {
+        updated_time?: string;
+        participants?: { data?: { id: string }[] };
+      }[];
+      paging?: { next?: string };
+    };
+
+    for (const conversation of parsed.data ?? []) {
+      const updated = conversation.updated_time
+        ? new Date(conversation.updated_time).getTime()
+        : null;
+      if (updated === null) continue;
+      if (now - updated >= windowMs) return open;
+      for (const participant of conversation.participants?.data ?? []) {
+        if (participant.id !== igUserId) open.add(participant.id);
+      }
+    }
+
+    url = parsed.paging?.next ?? null;
+    pages++;
+  }
+
+  return open;
+}
 
 async function main() {
   if (!AUTOMATION_ID) {
@@ -86,31 +147,55 @@ async function main() {
 
   const accessToken = decryptToken(automation.instagramAccount.accessToken);
 
-  // Everyone who already has the link, by IGSID. Someone who failed on one
-  // comment but succeeded on another must not be messaged again.
+  // Everyone who already has the LINK, by IGSID. Not merely everyone with a
+  // SENT row: the follow prompt and the opening DM are logged SENT too, and
+  // treating those as delivery is exactly what hides a gate-stopped person.
+  // The link is the reveal row, keyed `reveal:<igsid>`, written only once the
+  // gate has been cleared.
+  //
+  // Exception: the DM keyword path writes the prompt and the link to the same
+  // `dm:<messageId>` row, so a link delivered that way has no reveal row and
+  // its recipient stays a candidate here. That risks a duplicate send to
+  // someone who already has it — chosen deliberately over the alternative,
+  // which is never reaching anyone the gate stopped.
   const delivered = await prisma.dmLog.findMany({
     where: { automationId: automation.id, status: "SENT" },
-    select: { commenterId: true },
+    select: { commenterId: true, commentId: true },
   });
-  const deliveredIds = new Set(delivered.map((row) => row.commenterId));
+  const deliveredIds = new Set(
+    delivered
+      .filter((row) => row.commentId.startsWith("reveal:"))
+      .map((row) => row.commenterId)
+  );
 
-  const failed = await prisma.dmLog.findMany({
-    where: { automationId: automation.id, status: "FAILED" },
+  // Everyone this campaign ever touched, not just the failures. A person
+  // stopped by the follow gate has NO failed row — the prompt they got is
+  // logged as SENT, because the prompt really was sent, and nothing records
+  // that the link never followed. Selecting on FAILED alone therefore misses
+  // them entirely, which is how a campaign ended up with 1037 gate-stopped
+  // people none of whom this script could see.
+  const everyone = await prisma.dmLog.findMany({
+    where: { automationId: automation.id },
     select: {
       commenterId: true,
       commenterName: true,
       errorMessage: true,
+      status: true,
       createdAt: true,
     },
     orderBy: { createdAt: "desc" },
   });
 
-  // One attempt per person, keeping their most recent failure.
+  const failed = everyone.filter((row) => row.status === "FAILED");
+
+  // One attempt per person, keeping their most recent row.
   const candidates = new Map<
     string,
     { commenterName: string | null; errorMessage: string | null }
   >();
-  for (const row of failed) {
+  for (const row of everyone) {
+    // `deliveredIds` is keyed on a SENT reveal row, so this is the real test of
+    // "already has the link" — a SENT prompt does not count.
     if (deliveredIds.has(row.commenterId)) continue;
     if (row.errorMessage?.includes(HOPELESS_SUBCODE)) continue;
     if (candidates.has(row.commenterId)) continue;
@@ -120,7 +205,35 @@ async function main() {
     });
   }
 
-  const targets = [...candidates.entries()].slice(0, LIMIT);
+  // Meta's 24-hour window is the binding constraint, and it is invisible from
+  // DmLog. Ask Meta which conversations are still open and try those first:
+  // without this, a campaign with thousands of long-closed candidates spends
+  // its consecutive-refusal budget on them and stops before reaching anyone
+  // who could still have been helped. Pass --all to skip the ordering.
+  const ORDER_BY_WINDOW = !process.argv.includes("--all");
+  let ordered = [...candidates.entries()];
+
+  if (ORDER_BY_WINDOW) {
+    const open = await fetchOpenConversationIds(
+      accessToken,
+      automation.instagramAccount.instagramId
+    );
+    if (open === null) {
+      console.log(
+        "Could not read conversations; sending in database order instead.\n"
+      );
+    } else {
+      const inWindow = ordered.filter(([id]) => open.has(id));
+      const rest = ordered.filter(([id]) => !open.has(id));
+      console.log(
+        `Inside Meta's 24h window: ${inWindow.length} of ${ordered.length} candidates` +
+          (rest.length > 0 ? " (the rest are almost certainly unreachable)" : "")
+      );
+      ordered = [...inWindow, ...rest];
+    }
+  }
+
+  const targets = ordered.slice(0, LIMIT);
 
   const newest = failed[0]?.createdAt;
   const ageHours = newest
@@ -138,7 +251,7 @@ async function main() {
     );
   }
   console.log(`Already sent  : ${deliveredIds.size} people (skipped)`);
-  console.log(`Reachable     : ${candidates.size} people`);
+  console.log(`Never got link: ${candidates.size} people (gate-stopped + failed)`);
   console.log(`This run      : ${targets.length} (limit ${LIMIT})`);
   console.log(`Mode          : ${SEND ? "SENDING" : "DRY RUN"}`);
   console.log(`Prefix        : ${PREFIX}\n`);
@@ -197,15 +310,30 @@ async function main() {
         );
       }
 
-      // Record it so the dashboard reflects reality and a second run of this
-      // script skips them.
-      await prisma.dmLog.updateMany({
+      // Record it as a reveal, so the dashboard reflects reality and a second
+      // run skips them. It must be the `reveal:` row: that is what marks the
+      // link as delivered, and a gate-stopped person has no FAILED row to
+      // update — without this they would be messaged again on every run.
+      await prisma.dmLog.upsert({
         where: {
-          automationId: automation.id,
-          commenterId: userId,
-          status: "FAILED",
+          automationId_commentId: {
+            automationId: automation.id,
+            commentId: `reveal:${userId}`,
+          },
         },
-        data: {
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId: userId,
+          commenterName: info.commenterName,
+          commentText: "(manual resend)",
+          commentId: `reveal:${userId}`,
+          status: "SENT",
+          dmSentAt: new Date(),
+          errorMessage: "Delivered by the manual resend script",
+        },
+        update: {
           status: "SENT",
           dmSentAt: new Date(),
           errorMessage: "Delivered by the manual resend script",
