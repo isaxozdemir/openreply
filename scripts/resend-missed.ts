@@ -17,13 +17,18 @@
  *   - subcode 2534014, "user cannot be found" — the account is gone
  *   - anyone with no evidence of an open conversation
  *
- * Meta's 24-hour messaging window still applies and is NOT visible from here.
- * In practice this is the binding constraint: a first run against a campaign
- * whose failures were days old had all ten sends refused with subcode 2534022,
- * "outside of allowed window". The window counts from the person's last message
- * to the account, so this script only helps while the failure is recent — hours,
- * not days. Run it soon after a botched batch; by the next day it is too late
- * and there is no way to reopen the window from our side.
+ * Meta's 24-hour messaging window is the binding constraint. It counts from the
+ * person's last message TO the account — and note that a conversation's
+ * `updated_time` does not track it, because our own sends bump that too. A
+ * conversation Meta lists as recently active can still refuse every message
+ * with subcode 2534022, which is exactly what a run against this campaign hit:
+ * 39 "open" conversations, ten sends, ten refusals.
+ *
+ * --human-agent is the one way past it. Meta's HUMAN_AGENT tag extends the
+ * window to 7 days for a message a person has decided to send, one at a time,
+ * to resolve something — an apology-and-deliver run like this one. It is not
+ * for automation: the worker never sends it, and tagging routine campaign
+ * traffic this way violates Meta's policy and risks the account.
  *
  * Refusals are reported per subcode, never retried.
  *
@@ -32,6 +37,8 @@
  *   npx tsx scripts/resend-missed.ts --campaign <automationId> --send    # actually send
  *   ... --limit 50        cap how many are attempted (default 100)
  *   ... --delay 1500      ms between sends (default 1500)
+ *   ... --human-agent     send under Meta's HUMAN_AGENT tag (7-day window).
+ *                         Manual recovery only — read the note above first.
  */
 
 import { prisma } from "@/lib/db/client";
@@ -51,6 +58,13 @@ function arg(name: string): string | undefined {
 
 const AUTOMATION_ID = arg("campaign");
 const SEND = process.argv.includes("--send");
+// Meta's HUMAN_AGENT tag extends the reply window from 24 hours to 7 days. It
+// is for a message a person has decided to send, one at a time, to resolve
+// something — which is what this script is. It is NOT for automation, and the
+// worker never uses it. Opt in explicitly with --human-agent, and only for a
+// genuine apology-and-deliver run like this one; tagging routine campaign
+// traffic this way is a policy violation and risks the account.
+const HUMAN_AGENT = process.argv.includes("--human-agent");
 const LIMIT = Number(arg("limit") ?? 100);
 const DELAY_MS = Number(arg("delay") ?? 1500);
 // Prepended to the campaign message. These people commented a while ago and
@@ -65,10 +79,15 @@ const PREFIX =
 const HOPELESS_SUBCODE = "2534014";
 
 /**
- * IGSIDs whose conversation Meta still shows as active within 24 hours — the
- * only people a send can actually reach. Conversations come back newest-first,
- * so the walk stops at the first one past the window. Returns null if the read
- * fails, so the caller can fall back rather than treat "unknown" as "closed".
+ * IGSIDs whose conversation Meta shows as active within the last 24 hours.
+ *
+ * Treat this as an ordering hint, NOT as proof the window is open. The window
+ * counts from the person's last message to us, while `updated_time` moves for
+ * any activity in the thread — our own sends included — so a conversation can
+ * look fresh here and still refuse every message. It is used only to try the
+ * likeliest people first. Conversations come back newest-first, so the walk
+ * stops at the first one past 24 hours. Returns null if the read fails, so the
+ * caller can fall back rather than treat "unknown" as "closed".
  */
 async function fetchOpenConversationIds(
   accessToken: string,
@@ -226,8 +245,7 @@ async function main() {
       const inWindow = ordered.filter(([id]) => open.has(id));
       const rest = ordered.filter(([id]) => !open.has(id));
       console.log(
-        `Inside Meta's 24h window: ${inWindow.length} of ${ordered.length} candidates` +
-          (rest.length > 0 ? " (the rest are almost certainly unreachable)" : "")
+        `Recently active conversations: ${inWindow.length} of ${ordered.length} candidates (tried first; not a guarantee the window is open)`
       );
       ordered = [...inWindow, ...rest];
     }
@@ -295,7 +313,8 @@ async function main() {
           automation.instagramAccount.instagramId,
           userId,
           bodyText,
-          buttons
+          buttons,
+          { humanAgent: HUMAN_AGENT }
         );
       } else {
         await sendDirectMessage(
@@ -306,7 +325,8 @@ async function main() {
             message: automation.dmMessage,
             commenterName: info.commenterName,
             trackedLinks: automation.trackedLinks,
-          })}`
+          })}`,
+          { humanAgent: HUMAN_AGENT }
         );
       }
 

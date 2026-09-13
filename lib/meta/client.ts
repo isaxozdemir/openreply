@@ -416,7 +416,8 @@ export async function sendDirectMessage(
   accessToken: string,
   instagramAccountId: string,
   userId: string,
-  message: string
+  message: string,
+  options?: { humanAgent?: boolean }
 ): Promise<{ recipient_id: string; message_id: string }> {
   const response = await fetch(
     `${instagramGraphBase()}/${instagramAccountId}/messages`,
@@ -429,6 +430,12 @@ export async function sendDirectMessage(
       body: JSON.stringify({
         recipient: { id: userId },
         message: { text: message },
+        // The HUMAN_AGENT tag extends the reply window from 24 hours to 7 days,
+        // for a message a person has decided to send — not for automation. Only
+        // the manual recovery script passes it; the worker never does.
+        ...(options?.humanAgent
+          ? { messaging_type: "MESSAGE_TAG", tag: "HUMAN_AGENT" }
+          : {}),
       }),
     }
   );
@@ -445,7 +452,8 @@ export async function sendDirectMessageWithLinkButton(
   instagramAccountId: string,
   userId: string,
   text: string,
-  buttons: LinkButton[]
+  buttons: LinkButton[],
+  options?: { humanAgent?: boolean }
 ): Promise<{ recipient_id: string; message_id: string }> {
   const response = await fetch(
     `${instagramGraphBase()}/${instagramAccountId}/messages`,
@@ -467,6 +475,10 @@ export async function sendDirectMessageWithLinkButton(
             },
           },
         },
+        // See sendDirectMessage: manual recovery only, never the worker.
+        ...(options?.humanAgent
+          ? { messaging_type: "MESSAGE_TAG", tag: "HUMAN_AGENT" }
+          : {}),
       }),
     }
   );
