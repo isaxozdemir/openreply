@@ -191,6 +191,56 @@ describe("webhook route under a burst", () => {
     expect(large).toBe(small);
   });
 
+  it("keys a postback on Meta's message id", async () => {
+    await POST(
+      signedRequest({
+        object: "instagram",
+        entry: [
+          {
+            id: "ig_account_1",
+            messaging: [
+              {
+                sender: { id: "user_1" },
+                recipient: { id: "ig_account_1" },
+                postback: { mid: "m_abc", payload: "followcheck:auto_1" },
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    const jobs = mockQueue.addBulk.mock.calls[0][0];
+    expect(jobs[0].opts.jobId).toBe("postback_ig_account_1_user_1_m_abc");
+  });
+
+  it("lets a postback with no message id through unkeyed", async () => {
+    // Falling back to the payload gave every tap by the same user on the same
+    // campaign an identical jobId, and BullMQ silently drops an add that
+    // collides with a retained job — so tapping "i'm following" a second time,
+    // after actually following, did nothing at all.
+    await POST(
+      signedRequest({
+        object: "instagram",
+        entry: [
+          {
+            id: "ig_account_1",
+            messaging: [
+              {
+                sender: { id: "user_1" },
+                recipient: { id: "ig_account_1" },
+                postback: { payload: "followcheck:auto_1" },
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    const jobs = mockQueue.addBulk.mock.calls[0][0];
+    expect(jobs[0].opts.jobId).toBeUndefined();
+  });
+
   it("rejects an unsigned delivery", async () => {
     const response = await POST(
       new Request("https://example.com/api/webhook", {

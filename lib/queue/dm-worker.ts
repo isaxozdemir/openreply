@@ -882,6 +882,12 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
           "quick favor before i send your link. i don't make any money from this, it's free. if you want to support me, just don't unfollow after, and star the repo on github if it helps you. tap the button once you're following and i'll send it over",
         commenterName,
       });
+      // Re-prompting leaves no DmLog row of its own, so without this line a
+      // user stuck behind the gate is invisible: they tapped, Meta said they
+      // do not follow, and the dashboard shows nothing at all.
+      console.log(
+        `[DM Worker] Follow gate: ${userId} tapped but Meta reports not following (automation ${automation.id})`
+      );
       try {
         await sendDirectMessageWithButton(
           accessToken,

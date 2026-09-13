@@ -170,11 +170,20 @@ export async function POST(request: NextRequest) {
           mid: event.mid,
         },
         opts: {
-          // BullMQ forbids ":" in custom job ids, and the payload is
-          // "reveal:<id>", so build with underscores and strip any colons.
-          jobId: `postback_${event.instagramAccountId}_${event.userId}_${(
-            event.mid ?? event.payload
-          ).replace(/:/g, "_")}`,
+          // Deduplicate on Meta's message id, which is unique per tap. Falling
+          // back to the payload made the id identical for every tap by the same
+          // user on the same campaign — and BullMQ silently drops an add whose
+          // jobId matches a retained job, so a second tap did nothing at all.
+          // A user who taps "i'm following" again after actually following must
+          // get their link, so without a mid we let the job through unkeyed and
+          // rely on the handler being idempotent.
+          ...(event.mid
+            ? {
+                jobId: `postback_${event.instagramAccountId}_${
+                  event.userId
+                }_${event.mid.replace(/:/g, "_")}`,
+              }
+            : {}),
         },
       });
     }
