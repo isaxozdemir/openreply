@@ -109,8 +109,16 @@ Optional, for tuning the polling reconciler (defaults are fine to start):
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `COMMENT_POLL_INTERVAL_MS` | `300000` | How often the worker sweeps for missed comments (5 min). |
-| `COMMENT_POLL_MAX_PER_SWEEP` | `30` | Max new comments each campaign acts on per sweep. Keep it conservative; higher gets closer to Instagram's rate limits. |
-| `COMMENT_POLL_LOOKBACK_HOURS` | `72` | How far back a sweep considers comments. |
+| `COMMENT_POLL_MAX_PER_SWEEP` | `300` | Max new comments each campaign enqueues per sweep. This bounds enqueueing, not sending — the rate limiter below decides how fast the queue drains — so raising it cannot exceed Instagram's limits. Too low and a viral post's missed comments accumulate faster than the sweep collects them. |
+| `COMMENT_POLL_LOOKBACK_HOURS` | `144` | How far back a sweep considers comments. Instagram allows a private reply for 7 days, so anything under that leaves part of the window unused. |
+
+Sending, as opposed to collecting, is paced separately:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `DM_RATE_LIMIT_MAX` | `750` | Private replies per hour per account. 750 is Meta's documented cap; practitioner guidance for comment-to-DM sits nearer 200, because a burst draws attention to an account even when every call is inside the cap. |
+| `DM_MAX_REQUEUE_ATTEMPTS` | `12` | How many times a job waits for a free slot before being dropped. Read it against the send rate: this is the drain budget, and too small a budget discards a viral backlog that was still well inside the 7-day reply window. |
+| `DM_REQUEUE_DELAY_MS` | `600000` | How long a job waits before trying for a slot again (10 min). The limit is a rolling hour, so slots free continuously. |
 
 ## The Meta app
 
