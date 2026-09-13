@@ -1097,10 +1097,39 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
       })
     );
   } catch (error) {
+    // The follow-up goes out minutes after the link, by which time the thread
+    // may be gone — so its failures are expected and must not be mistaken for a
+    // lost link. They were only ever logged to the console, which means a burst
+    // of them is invisible once the logs roll. Record them under their own key,
+    // never against the reveal row, so counts stay honest either way.
     console.log(
       "[DM Worker] Failed to send follow-up message:",
       formatError(error)
     );
+    await prisma.dmLog
+      .upsert({
+        where: {
+          automationId_commentId: {
+            automationId: automation.id,
+            commentId: `followup:${userId}`,
+          },
+        },
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId: userId,
+          commenterName: commenterName ?? null,
+          commentText: "(follow-up)",
+          commentId: `followup:${userId}`,
+          status: "FAILED",
+          errorMessage: formatError(error),
+        },
+        update: { status: "FAILED", errorMessage: formatError(error) },
+      })
+      .catch(() => {
+        // Diagnostic only — never let recording a follow-up failure fail the job.
+      });
   }
 }
 

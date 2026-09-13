@@ -17,6 +17,7 @@
     "audit-undelivered": "tsx scripts/audit-undelivered.ts",
     "check-reachable": "tsx scripts/check-reachable.ts",
     "audit-failures": "tsx scripts/audit-failures.ts",
+    "audit-failure-paths": "tsx scripts/audit-failure-paths.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
