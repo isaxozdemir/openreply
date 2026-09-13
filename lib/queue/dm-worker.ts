@@ -43,16 +43,11 @@ import {
 
 // Retry schedule for transient failures. The first retry is immediate.
 //
-// Meta's "Service temporarily unavailable" (code=2 sub=1545133) is the common
-// first failure, and production shows it is usually not an outage at all: the
-// send went through and only the response failed. The retry then comes back
-// "The comment is invalid for a private reply", because the comment's single
-// private reply has already been used — in a 21-case sample, 20 ended that way
-// and 1 genuinely recovered. Nothing is gained by waiting: if the send did land,
-// no delay helps, and if it truly was a blip, the sooner we retry the better the
-// odds of catching the comment's narrow reply window still open. Later retries
-// back off for account-level conditions (throttling, token refresh) that do take
-// time to clear.
+// A transient error can be followed by "invalid for a private reply" on retry.
+// That sequence does not prove delivery: a user may see only an empty thread.
+// Retry transient failures, stop on a definitive rejection, and keep delivery
+// unconfirmed unless a send succeeds. Later retries back off for account-level
+// conditions (throttling, token refresh) that take time to clear.
 const BACKOFF_DELAYS = [1 * 1000, 2 * 60 * 1000, 15 * 60 * 1000];
 
 // How many jobs the worker sends in parallel. Meta allows 750 private replies
@@ -140,15 +135,11 @@ export function isPermanentSendFailure(error: unknown): boolean {
 }
 
 /**
- * True when a failure looks like the retry of a send that actually landed.
- *
- * The pattern in production: attempt 1 gets "Service temporarily unavailable"
- * (code=2), attempt 2 gets "invalid for a private reply" — Meta rejects it
- * because the comment's one private reply has already been used, by the very
- * attempt that reported the outage. The DM reached the user; only our record
- * of it says otherwise. Worth annotating so the logs are not read as a loss.
+ * Identify a rejected retry whose earlier delivery outcome is unknown.
+ * Neither the retry count nor subcode 2534025 proves a previous send reached
+ * the user. Keep FAILED and describe the uncertainty without claiming success.
  */
-function looksLikeAlreadyDelivered(
+function isUnconfirmedPrivateReplyRetry(
   error: unknown,
   attemptsMade: number
 ): boolean {
@@ -802,8 +793,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       }
 
       const permanent = isPermanentSendFailure(error);
-      const errorMessage = looksLikeAlreadyDelivered(error, job.attemptsMade)
-        ? `${formatError(error)} — the previous attempt reported a transient outage but had most likely already delivered this reply`
+      const errorMessage = isUnconfirmedPrivateReplyRetry(error, job.attemptsMade)
+        ? `${formatError(error)} — retry rejected; delivery from earlier attempts is unconfirmed`
         : formatError(error);
 
       await prisma.dmLog.update({
@@ -1626,4 +1617,3 @@ export function createDMWorker(): Worker<DmQueueJob> {
 
   return worker;
 }
-

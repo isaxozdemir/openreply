@@ -1284,7 +1284,7 @@ describe("DM Worker — retry budget and rate-limit slots", () => {
     expect(error.message).toContain("invalid for a private reply");
   });
 
-  it("notes when a failure is most likely an already-delivered send", async () => {
+  it("does not claim delivery when Meta rejects a private-reply retry", async () => {
     const { MetaApiError } = await import("@/lib/meta/client");
     mockSendPrivateReply.mockRejectedValue(
       new MetaApiError(
@@ -1296,12 +1296,13 @@ describe("DM Worker — retry budget and rate-limit slots", () => {
     );
 
     const processor = getProcessor();
-    // attemptsMade 1 = this is the retry, so the first attempt already used
-    // the comment's single private reply.
+    // A retry rejection does not prove that the first message arrived.
     await processor({ ...createMockJob(), attemptsMade: 1 }).catch(() => {});
 
     const logged = mockPrisma.dmLog.update.mock.calls.at(-1)?.[0];
-    expect(logged.data.errorMessage).toContain("already delivered");
+    expect(logged.data.status).toBe("FAILED");
+    expect(logged.data.errorMessage).toContain("delivery from earlier attempts is unconfirmed");
+    expect(logged.data.errorMessage).not.toContain("already delivered");
   });
 
   it("does not add that note on a first-attempt rejection", async () => {
@@ -1321,6 +1322,7 @@ describe("DM Worker — retry budget and rate-limit slots", () => {
 
     const logged = mockPrisma.dmLog.update.mock.calls.at(-1)?.[0];
     expect(logged.data.errorMessage).not.toContain("already delivered");
+    expect(logged.data.errorMessage).not.toContain("earlier attempts");
   });
 
   it("stops retrying once the 24-hour messaging window has closed", async () => {

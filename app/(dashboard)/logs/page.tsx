@@ -17,6 +17,8 @@ interface DmLog {
   commentText: string;
   status: string;
   errorMessage: string | null;
+  commentId: string;
+  attempts: number;
   createdAt: string;
   automation: { name: string; keywords: string[] };
   instagramAccount: { username: string };
@@ -185,6 +187,18 @@ export default function LogsPage() {
                     </td>
                     <td className="px-4 py-4 sm:px-6">
                       <StatusBadge status={log.status} />
+                      {log.errorMessage && (
+                        <details className="mt-2 text-xs">
+                          <summary className="cursor-pointer text-muted hover:text-foreground">
+                            Error details
+                          </summary>
+                          <div className="mt-2 w-72 space-y-2 whitespace-pre-wrap break-words text-muted">
+                            <p>{log.errorMessage}</p>
+                            <p>Attempts: {log.attempts}</p>
+                            <p>Comment / event: {log.commentId}</p>
+                          </div>
+                        </details>
+                      )}
                     </td>
                     <td className="px-4 py-4 text-muted whitespace-nowrap sm:px-6">
                       {new Date(log.createdAt).toLocaleString("en-US", {
