@@ -258,7 +258,27 @@ export async function POST(request: NextRequest) {
     }
 
     if (jobs.length > 0) {
-      await queue.addBulk(jobs);
+      // One pipelined call, but that also means one failure mode: addBulk is
+      // all-or-nothing, so a single bad job takes the whole delivery with it —
+      // including a button tap that shared the payload with a comment or read
+      // receipt. Name what was lost, since the catch below only records the
+      // delivery as FAILED without saying which events it was carrying.
+      try {
+        await queue.addBulk(jobs);
+      } catch (error) {
+        const kinds = [
+          commentEvents.length && `${commentEvents.length} comment`,
+          postbackEvents.length && `${postbackEvents.length} button tap`,
+          messageEvents.length && `${messageEvents.length} message`,
+        ]
+          .filter(Boolean)
+          .join(", ");
+        console.error(
+          `[Webhook] Failed to enqueue ${jobs.length} job(s) (${kinds}):`,
+          error instanceof Error ? error.message : error
+        );
+        throw error;
+      }
     }
 
     // Remember which ads a post was boosted into, so the polling sweep can see
