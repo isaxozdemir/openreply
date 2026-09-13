@@ -20,13 +20,18 @@ import { recordWorkerAlert } from "@/lib/ops/worker-health";
 /**
  * Backlog at which a comment risks aging out before its job runs.
  *
- * At a concurrency of 20 and roughly half a second per send, the worker clears
- * about 40 jobs a second, so a thousand waiting jobs is under a minute of work
- * — comfortably inside the window. Ten thousand is not, and that is the shape
- * of the incident worth shouting about.
+ * Concurrency is not what sets the drain rate — the hourly private-reply limit
+ * is. At the default 750/hour the queue clears ~12 a second only in bursts;
+ * sustained, it is 750 an hour whatever the worker's concurrency. So depth has
+ * to be read as hours of work: 2,000 waiting is a few hours, which is fine
+ * against a 7-day reply window, and a viral post legitimately reaches it.
+ * 10,000 is over a day of backlog and worth shouting about.
+ *
+ * Both are configurable, because the right threshold depends on the send rate
+ * this deployment runs at (DM_RATE_LIMIT_MAX).
  */
-const WARN_DEPTH = 2_000;
-const ALARM_DEPTH = 10_000;
+const WARN_DEPTH = Number(process.env.QUEUE_WARN_DEPTH ?? 2_000);
+const ALARM_DEPTH = Number(process.env.QUEUE_ALARM_DEPTH ?? 10_000);
 
 /** Don't repeat the same alert while one burst is still draining. */
 const REALERT_INTERVAL_MS = 15 * 60_000;

@@ -36,9 +36,14 @@ import {
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 
-// Only consider comments from the last few days — older ones are outside
-// Instagram's private-reply window anyway, so a DM to them would just fail.
-const LOOKBACK_HOURS = Number(process.env.COMMENT_POLL_LOOKBACK_HOURS ?? 72);
+// How far back a sweep looks for comments it has not handled.
+//
+// Instagram allows a private reply for 7 days after the comment, so 72 hours
+// left three days of that window unused: a comment missed during a viral burst
+// and not collected within three days was never retried, even though Meta
+// would still have accepted the reply. 144 hours keeps a day of margin against
+// clock skew and the queue's own delay while staying inside the real limit.
+const LOOKBACK_HOURS = Number(process.env.COMMENT_POLL_LOOKBACK_HOURS ?? 144);
 // Hard cap on how many new comments a single campaign can enqueue per sweep.
 //
 // This limits ENQUEUEING, not sending: the rate limiter decides how fast the
