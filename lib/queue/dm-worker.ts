@@ -99,7 +99,14 @@ function isTemplateRejection(error: unknown): boolean {
 const PERMANENT_SUBCODES = new Set([
   2534025, // The comment is invalid for a private reply
   2534014, // The requested user cannot be found
-  2534001, // Thread owner archived/deleted the conversation, or it never existed
+  // Thread owner archived/deleted the conversation, or it never existed.
+  // Meta returns this for a PRIVATE REPLY too, not just a DM into an existing
+  // thread — one campaign took 976 of them, every one on the comment path,
+  // where no thread of ours is involved at all. In practice it means the
+  // person's inbox will not accept a message from this account: they blocked
+  // it, restricted it, deleted the thread, or their settings refuse messages
+  // from people they do not follow. None of that clears on retry.
+  2534001,
   // "This message is sent outside of allowed window" — the 24-hour messaging
   // window, counted from the person's last message to the account. It cannot be
   // reopened from our side, so no retry and no later sweep will ever land it.

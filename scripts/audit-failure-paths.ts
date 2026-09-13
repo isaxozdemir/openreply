@@ -85,17 +85,31 @@ async function main() {
     );
   }
 
-  // On the reveal path, how long after the tap did the send fail? A long gap
-  // points at the delayed follow-up or a stale queue, a short one at the send
-  // itself. dmSentAt is null for a row that never delivered, so this uses the
-  // spread between the row's creation and its last update instead.
-  const revealRows = rows.filter((r) => r.commentId.startsWith("reveal:"));
-  if (revealRows.length > 0) {
-    console.log(
-      `\nReveal-path failures: ${revealRows.length}` +
-        `\n  oldest: ${revealRows[revealRows.length - 1]?.createdAt.toISOString()}` +
-        `\n  newest: ${revealRows[0]?.createdAt.toISOString()}`
-    );
+  // When a subcode is concentrated in time, it was an episode — an outage, a
+  // bad deploy, one viral post whose comments all aged out together — rather
+  // than a steady condition. That distinction decides whether there is anything
+  // left to fix, so print a per-day count for the biggest subcodes.
+  const byDay = new Map<string, Map<string, number>>();
+  for (const row of rows) {
+    const day = row.createdAt.toISOString().slice(0, 10);
+    const sub = subcodeOf(row.errorMessage);
+    const inner = byDay.get(sub) ?? new Map<string, number>();
+    inner.set(day, (inner.get(day) ?? 0) + 1);
+    byDay.set(sub, inner);
+  }
+
+  for (const [sub, days] of [...byDay.entries()].sort(
+    (a, b) =>
+      [...b[1].values()].reduce((x, y) => x + y, 0) -
+      [...a[1].values()].reduce((x, y) => x + y, 0)
+  )) {
+    const total = [...days.values()].reduce((x, y) => x + y, 0);
+    if (total < 10) continue;
+    console.log(`\n  sub=${sub} by day (${total} total):`);
+    for (const [day, count] of [...days.entries()].sort()) {
+      const bar = "#".repeat(Math.min(50, Math.ceil(count / 5)));
+      console.log(`    ${day}  ${String(count).padStart(5)}  ${bar}`);
+    }
   }
 
   await prisma.$disconnect();
