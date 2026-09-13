@@ -99,7 +99,10 @@ const PERMANENT_SUBCODES = new Set([
   2534025, // The comment is invalid for a private reply
   2534014, // The requested user cannot be found
   2534001, // Thread owner archived/deleted the conversation, or it never existed
-  2534022, // Private reply window expired for this comment
+  // "This message is sent outside of allowed window" — the 24-hour messaging
+  // window, counted from the person's last message to the account. It cannot be
+  // reopened from our side, so no retry and no later sweep will ever land it.
+  2534022,
 ]);
 
 // Same rejections expressed as text, for errors that arrive without a subcode.

@@ -1192,6 +1192,25 @@ describe("DM Worker — retry budget and rate-limit slots", () => {
     expect(logged.data.errorMessage).not.toContain("already delivered");
   });
 
+  it("stops retrying once the 24-hour messaging window has closed", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockSendPrivateReply.mockRejectedValue(
+      new MetaApiError(
+        100,
+        2534022,
+        "trace",
+        "This message is sent outside of allowed window."
+      )
+    );
+
+    const processor = getProcessor();
+    const error = await processor(createMockJob()).catch((e) => e);
+
+    // The window counts from the person's last message to the account and
+    // cannot be reopened from our side, so retrying only burns attempts.
+    expect(error.name).toBe("UnrecoverableError");
+  });
+
   it("keeps retrying a transient Meta outage", async () => {
     const { MetaApiError } = await import("@/lib/meta/client");
     mockSendPrivateReply.mockRejectedValue(

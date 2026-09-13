@@ -1,6 +1,7 @@
 import { createDMWorker, drainWorkerFailures } from "@/lib/queue/dm-worker";
 import { recordWorkerHeartbeat } from "@/lib/ops/worker-health";
 import { reconcileComments } from "@/lib/polling/comment-reconciler";
+import { checkQueueBacklog } from "@/lib/ops/queue-watch";
 import os from "node:os";
 
 const worker = createDMWorker();
@@ -27,8 +28,22 @@ async function heartbeat() {
   }
 }
 
+async function watchBacklog() {
+  try {
+    await checkQueueBacklog();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[DM Worker] Backlog check failed:", message);
+  }
+}
+
 void heartbeat();
-const heartbeatTimer = setInterval(() => void heartbeat(), HEARTBEAT_INTERVAL_MS);
+const heartbeatTimer = setInterval(() => {
+  void heartbeat();
+  // Same cadence as the heartbeat: frequent enough to catch a burst while the
+  // comments it holds can still be replied to.
+  void watchBacklog();
+}, HEARTBEAT_INTERVAL_MS);
 
 async function poll() {
   try {
