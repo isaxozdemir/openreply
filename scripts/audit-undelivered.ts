@@ -137,8 +137,17 @@ async function main() {
     console.log(`    stopped at gate : ${gated.length}`);
     console.log(`    send failed     : ${outright.length}`);
     console.log(
-      `  still reachable   : ${reachable.length}  (est. inside Meta's 24h window)`
+      `  still reachable   : ${reachable.length}  (rough lower bound — see below)`
     );
+    if (reachable.length === 0 && undelivered.length > 0) {
+      // Do not let this read as "nobody can be reached". Someone stopped by the
+      // gate has no `reveal:` or `dm:` row by definition, so this estimate
+      // cannot see them and reports zero even if they tapped minutes ago.
+      console.log(
+        `    ^ this estimate is blind to gate-stopped people; confirm with:\n` +
+          `      npm run check-reachable -- --campaign ${automation.id}`
+      );
+    }
 
     if (listCount > 0 && reachable.length > 0) {
       console.log(`\n  first ${Math.min(listCount, reachable.length)} reachable:`);
