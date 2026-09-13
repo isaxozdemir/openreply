@@ -20,6 +20,7 @@
     "audit-failure-paths": "tsx scripts/audit-failure-paths.ts",
     "report-campaign": "tsx scripts/report-campaign.ts",
     "count-open-threads": "tsx scripts/count-open-threads.ts",
+    "check-webhook-fields": "tsx scripts/check-webhook-fields.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

@@ -840,7 +840,12 @@ export async function subscribeInstagramAccountToWebhooks(
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({
-        subscribed_fields: ["comments", "messages"],
+        // messaging_postbacks carries button taps. Without it the opening DM's
+        // button and the follow prompt's button fire nothing: the person taps,
+        // no webhook arrives, and the link is never sent. It was missing here
+        // from the start, so every account connected through this app relied on
+        // someone adding the field by hand in the Meta dashboard.
+        subscribed_fields: ["comments", "messages", "messaging_postbacks"],
       }),
     }
   );
