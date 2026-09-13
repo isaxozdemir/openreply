@@ -383,8 +383,18 @@ function DmScreen({
             </div>
           </>
         )}
+        {/* The follow prompt is not a step everyone walks through. The opening
+            DM's own button already carries the follow check, so a confirmed
+            follower goes straight from it to the link; this appears only for
+            someone Instagram reports as not following. Showing it inline after
+            the opening DM made the flow look like two taps when it is one. */}
         {requireFollow && (
           <>
+            {openingDmEnabled && (
+              <p className="text-center text-[11px] text-zinc-500">
+                only if Instagram says they don&apos;t follow yet
+              </p>
+            )}
             <div className="flex items-end gap-2">
               <Avatar url={avatarUrl} size={24} />
               <div className="max-w-[80%] overflow-hidden rounded-2xl rounded-bl-md bg-zinc-800">

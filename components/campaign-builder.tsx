@@ -856,9 +856,20 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
                 />
                 <p className="text-xs text-muted">
                   We send the link only after they tap the button and Instagram
-                  confirms the follow. If it can&apos;t be verified, we send it
-                  anyway.
+                  confirms the follow. If Instagram won&apos;t tell us — it
+                  can&apos;t confirm a follow for someone who has never messaged
+                  you — we send the link anyway rather than leave a real
+                  follower stuck.
                 </p>
+                {!openingDmEnabled && (
+                  <p className="text-xs text-amber-500/90">
+                    Heads up: with no opening DM, this prompt is sent as the
+                    reply to their comment — and Instagram allows only one reply
+                    per comment. If anything goes wrong after that, there is no
+                    second chance to reach them. Turning on an opening DM moves
+                    the follow step into DMs, where it can be retried.
+                  </p>
+                )}
               </div>
             )}
           </div>
