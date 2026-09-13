@@ -14,6 +14,27 @@ export function requireEnv(name: string): string {
   return readEnv(name);
 }
 
+export function getRedisUrl(): string {
+  const value = readEnv("REDIS_URL").trim();
+  try {
+    const url = new URL(value);
+    if (
+      !["redis:", "rediss:"].includes(url.protocol) ||
+      !url.hostname ||
+      /[$\s{}<>]/.test(url.hostname)
+    ) {
+      throw new Error("Invalid Redis address");
+    }
+  } catch {
+    // Never include the URL: it contains the Redis password. Railway variable
+    // references copied into Vercel are literal strings, not expanded values.
+    throw new Error(
+      "REDIS_URL must be a resolved redis:// or rediss:// URL, not a variable reference. On Vercel, use Railway's resolved REDIS_PUBLIC_URL."
+    );
+  }
+  return value;
+}
+
 export function getBaseUrl(): string {
   return process.env.NEXTAUTH_URL ?? "http://localhost:3000";
 }

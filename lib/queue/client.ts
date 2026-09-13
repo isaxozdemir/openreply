@@ -6,12 +6,13 @@
 
 import { Queue } from "bullmq";
 import Redis from "ioredis";
+import { getRedisUrl } from "@/lib/env";
 
 let connection: Redis | null = null;
 
 export function getRedisConnection(): Redis {
   if (!connection) {
-    connection = new Redis(process.env.REDIS_URL!, {
+    connection = new Redis(getRedisUrl(), {
       maxRetriesPerRequest: null, // Required by BullMQ
     });
   }

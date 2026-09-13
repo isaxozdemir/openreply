@@ -87,7 +87,9 @@ export async function POST(request: NextRequest) {
   // dozens of times — all of it serial, all of it before Meta gets its 200.
   const accountIds = [
     ...new Set(
-      [...commentEvents, ...messageEvents].map((e) => e.instagramAccountId)
+      [...commentEvents, ...messageEvents, ...postbackEvents, ...readEvents].map(
+        (e) => e.instagramAccountId
+      )
     ),
   ];
   const accounts =
@@ -109,24 +111,27 @@ export async function POST(request: NextRequest) {
       ? String(payload.object)
       : null;
 
-  /**
-   * Record the delivery with the outcome it actually had.
-   *
-   * Written once, at the end, rather than inserted PENDING and updated after
-   * the response: work started after the response is not guaranteed to finish
-   * in a serverless or container runtime, which left rows stuck at PENDING
-   * forever. Only FAILED rows are ever read back, so recording the row after
-   * the work — not before it — loses nothing.
-   */
+  // Persist before touching Redis. A runtime timeout cannot run our catch
+  // block; writing only at the end made delivered button taps disappear from
+  // diagnostics whenever enqueueing stalled. PENDING means processing did not
+  // finish, not that Meta never delivered the event.
+  const delivery = await prisma.webhookEvent.create({
+    data: {
+      workspaceId,
+      object: objectType,
+      payload: payload as Prisma.InputJsonValue,
+      status: "PENDING",
+    },
+  });
+
+  // Await the outcome update before responding, including on failure.
   const recordDelivery = (
     status: "PROCESSED" | "FAILED",
     errorMessage?: string
   ) =>
-    prisma.webhookEvent.create({
+    prisma.webhookEvent.update({
+      where: { id: delivery.id },
       data: {
-        workspaceId,
-        object: objectType,
-        payload: payload as Prisma.InputJsonValue,
         status,
         errorMessage: errorMessage ?? null,
         processedAt: new Date(),

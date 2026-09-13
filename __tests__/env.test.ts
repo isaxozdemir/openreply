@@ -4,10 +4,34 @@ import {
   getMetaGraphApiVersion,
   isEmailAllowedToSignIn,
   requireEnv,
+  getRedisUrl,
 } from "../lib/env";
 
 beforeEach(() => {
   vi.unstubAllEnvs();
+});
+
+describe("Redis configuration", () => {
+  it.each([
+    "redis://default:secret@proxy.rlwy.net:12345",
+    "redis://default:secret@redis.railway.internal:6379",
+    "rediss://default:secret@redis.example.com:6380/1",
+    "redis://[::1]:6379",
+  ])("accepts a resolved address: %s", (url) => {
+    vi.stubEnv("REDIS_URL", url);
+    expect(getRedisUrl()).toBe(url);
+  });
+
+  it.each([
+    "redis://default:secret@$:6379",
+    "redis://default:secret@${{RAILWAY_TCP_PROXY_DOMAIN}}:12345",
+    "${{Redis.REDIS_PUBLIC_URL}}",
+    "https://redis.example.com",
+  ])("rejects invalid addresses without leaking credentials: %s", (url) => {
+    vi.stubEnv("REDIS_URL", url);
+    expect(getRedisUrl).toThrow("REDIS_URL must be a resolved");
+    expect(getRedisUrl).not.toThrow("secret");
+  });
 });
 
 describe("environment helpers", () => {

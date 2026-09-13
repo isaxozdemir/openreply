@@ -110,22 +110,22 @@ describe("webhook route under a burst", () => {
     ]);
   });
 
-  it("writes the webhook row once, attributed and never UPDATEd", async () => {
+  it("uses one attributed receipt and one outcome update per delivery", async () => {
     await POST(signedRequest(commentBurst(100)));
 
-    // The old code inserted PENDING then UPDATEd the same row once per event
-    // to set the same workspaceId, turning one insert into a hundred writes.
+    // One durable receipt and one outcome update, independent of batch size.
     expect(mockPrisma.webhookEvent.create).toHaveBeenCalledTimes(1);
-    expect(mockPrisma.webhookEvent.update).not.toHaveBeenCalled();
+    expect(mockPrisma.webhookEvent.update).toHaveBeenCalledTimes(1);
     expect(mockPrisma.webhookEvent.create.mock.calls[0][0].data.workspaceId).toBe(
       "workspace_1"
     );
   });
 
-  it("records the delivery as PROCESSED, not PENDING", async () => {
+  it("records receipt before processing and awaits the PROCESSED outcome", async () => {
     await POST(signedRequest(commentBurst(10)));
 
-    const data = mockPrisma.webhookEvent.create.mock.calls[0][0].data;
+    expect(mockPrisma.webhookEvent.create.mock.calls[0][0].data.status).toBe("PENDING");
+    const data = mockPrisma.webhookEvent.update.mock.calls[0][0].data;
     expect(data.status).toBe("PROCESSED");
     expect(data.processedAt).toBeInstanceOf(Date);
   });
@@ -136,7 +136,7 @@ describe("webhook route under a burst", () => {
     // rows at PENDING in production. Hold the write open and assert the
     // handler is still waiting on it.
     let settle: () => void = () => {};
-    mockPrisma.webhookEvent.create.mockImplementation(
+    mockPrisma.webhookEvent.update.mockImplementation(
       () =>
         new Promise((resolve) => {
           settle = () => resolve({ id: "we_1" });
@@ -157,13 +157,39 @@ describe("webhook route under a burst", () => {
     expect(response.status).toBe(200);
   });
 
+  it("preserves the raw button tap while Redis is stalled", async () => {
+    let rejectEnqueue: (error: Error) => void = () => {};
+    mockQueue.addBulk.mockImplementation(() => new Promise((_resolve, reject) => {
+      rejectEnqueue = reject;
+    }));
+    const payload = {
+      object: "instagram",
+      entry: [{ id: "ig_account_1", messaging: [{
+        sender: { id: "user_1" },
+        postback: { mid: "tap_1", payload: "followcheck:auto_1" },
+      }] }],
+    };
+    const pending = POST(signedRequest(payload));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockPrisma.webhookEvent.create).toHaveBeenCalledWith({ data: {
+      workspaceId: "workspace_1", object: "instagram", payload, status: "PENDING",
+    } });
+    expect(mockPrisma.webhookEvent.update).not.toHaveBeenCalled();
+    rejectEnqueue(new Error("Redis connection failed"));
+    expect((await pending).status).toBe(500);
+    expect(mockPrisma.webhookEvent.update).toHaveBeenCalledWith({
+      where: { id: "we_1" },
+      data: { status: "FAILED", errorMessage: "Redis connection failed", processedAt: expect.any(Date) },
+    });
+  });
+
   it("records a failed delivery as FAILED with the reason", async () => {
     mockQueue.addBulk.mockRejectedValue(new Error("redis unavailable"));
 
     const response = await POST(signedRequest(commentBurst(5)));
 
     expect(response.status).toBe(500);
-    const data = mockPrisma.webhookEvent.create.mock.calls[0][0].data;
+    const data = mockPrisma.webhookEvent.update.mock.calls[0][0].data;
     expect(data.status).toBe("FAILED");
     expect(data.errorMessage).toContain("redis unavailable");
   });
@@ -173,9 +199,11 @@ describe("webhook route under a burst", () => {
     const small =
       mockPrisma.instagramAccount.findMany.mock.calls.length +
       mockPrisma.webhookEvent.create.mock.calls.length +
+      mockPrisma.webhookEvent.update.mock.calls.length +
       mockQueue.addBulk.mock.calls.length;
 
     vi.clearAllMocks();
+    mockPrisma.webhookEvent.update.mockResolvedValue({});
     mockPrisma.webhookEvent.create.mockResolvedValue({ id: "we_2" });
     mockPrisma.instagramAccount.findMany.mockResolvedValue([
       { instagramId: "ig_account_1", workspaceId: "workspace_1" },
@@ -186,6 +214,7 @@ describe("webhook route under a burst", () => {
     const large =
       mockPrisma.instagramAccount.findMany.mock.calls.length +
       mockPrisma.webhookEvent.create.mock.calls.length +
+      mockPrisma.webhookEvent.update.mock.calls.length +
       mockQueue.addBulk.mock.calls.length;
 
     expect(large).toBe(small);
