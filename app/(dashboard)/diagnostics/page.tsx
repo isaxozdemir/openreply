@@ -28,6 +28,12 @@ interface DiagnosticsData {
     errorMessage: string | null;
     createdAt: string;
   }>;
+  recentWebhooks: Array<{
+    id: string;
+    object: string | null;
+    status: string;
+    createdAt: string;
+  }>;
   dmFailures: Array<{
     id: string;
     status: string;
@@ -241,6 +247,31 @@ export default function DiagnosticsPage() {
             </div>
           ) : (
             <EmptyState label="No failed webhook events." />
+          )}
+        </Section>
+
+        {/* Failures cannot show the worst case — deliveries that stopped
+            arriving at all. That looks like silence everywhere else, so show
+            when the last one landed regardless of outcome. */}
+        <Section title="Last Webhook Deliveries">
+          {data?.recentWebhooks.length ? (
+            <div className="space-y-3">
+              {data.recentWebhooks.map((event) => (
+                <div key={event.id} className="border-b border-border pb-3 last:border-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-foreground">
+                      {event.object ?? "Instagram webhook"}
+                    </p>
+                    <StatusBadge status={event.status} />
+                  </div>
+                  <p className="mt-1 text-xs text-muted">
+                    {formatDate(event.createdAt)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState label="No webhook has ever been received. Check the callback URL and subscribed fields in the Meta dashboard." />
           )}
         </Section>
       </div>

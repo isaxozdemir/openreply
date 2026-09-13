@@ -13,6 +13,8 @@ const statusConfig: Record<string, { text: string; label: string }> = {
   // The prompt went out, the link did not. Worth a colour of its own: these
   // are people still waiting, not people who were served.
   SKIPPED_FOLLOW_GATE: { text: "text-warning", label: "Follow gate" },
+  // WebhookStatus, shown on the diagnostics delivery list.
+  PROCESSED: { text: "text-success", label: "Processed" },
 };
 
 interface StatusBadgeProps {

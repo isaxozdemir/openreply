@@ -21,6 +21,7 @@ export async function GET() {
     workerHealth,
     workerAlerts,
     webhookFailures,
+    recentWebhooks,
     dmFailures,
     tokenRefreshFailures,
     operationalEvents,
@@ -39,6 +40,15 @@ export async function GET() {
         createdAt: true,
         processedAt: true,
       },
+    }),
+    // The last few deliveries of ANY status. Failures alone cannot show the
+    // most damaging case — deliveries that stopped arriving altogether, which
+    // looks identical to "nothing happened" from every other panel.
+    prisma.webhookEvent.findMany({
+      where: { workspaceId },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+      select: { id: true, object: true, status: true, createdAt: true },
     }),
     prisma.dmLog.findMany({
       where: {
@@ -113,6 +123,7 @@ export async function GET() {
       workerHealth,
       workerAlerts,
       webhookFailures,
+      recentWebhooks,
       dmFailures,
       tokenRefreshFailures,
       operationalEvents,
