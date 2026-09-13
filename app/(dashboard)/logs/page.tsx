@@ -34,6 +34,7 @@ const STATUS_FILTERS = [
   "SENT",
   "FAILED",
   "PENDING",
+  "SKIPPED_FOLLOW_GATE",
   "SKIPPED_RATE_LIMIT",
   "SKIPPED_PLAN_LIMIT",
   "SKIPPED_DEDUP",
@@ -115,7 +116,9 @@ export default function LogsPage() {
                 }
               `}
             >
-              {status === "ALL" ? "All" : status.replace("SKIPPED_", "").replace("_", " ")}
+              {status === "ALL"
+                ? "All"
+                : status.replace("SKIPPED_", "").replaceAll("_", " ")}
             </button>
           ))}
         </div>

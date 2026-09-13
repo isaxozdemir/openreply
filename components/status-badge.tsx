@@ -10,6 +10,9 @@ const statusConfig: Record<string, { text: string; label: string }> = {
   SKIPPED_RATE_LIMIT: { text: "text-warning", label: "Rate limited" },
   SKIPPED_PLAN_LIMIT: { text: "text-warning", label: "Skipped" },
   SKIPPED_NO_MATCH: { text: "text-muted", label: "No match" },
+  // The prompt went out, the link did not. Worth a colour of its own: these
+  // are people still waiting, not people who were served.
+  SKIPPED_FOLLOW_GATE: { text: "text-warning", label: "Follow gate" },
 };
 
 interface StatusBadgeProps {
