@@ -35,8 +35,13 @@ export class RateLimitError extends MetaApiError {
 }
 
 export class PermissionError extends MetaApiError {
-  constructor(message: string, fbTraceId?: string) {
-    super(100, undefined, fbTraceId, message);
+  constructor(
+    message: string,
+    fbTraceId?: string,
+    code = 100,
+    subcode?: number
+  ) {
+    super(code, subcode, fbTraceId, message);
     this.name = "PermissionError";
   }
 }
@@ -135,7 +140,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
       case 10:
       case 100:
       case 200:
-        throw new PermissionError(message, traceId);
+        throw new PermissionError(message, traceId, code, subcode);
       default:
         throw new MetaApiError(code, subcode, traceId, message);
     }
