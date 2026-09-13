@@ -1153,6 +1153,45 @@ describe("DM Worker — retry budget and rate-limit slots", () => {
     expect(error.message).toContain("invalid for a private reply");
   });
 
+  it("notes when a failure is most likely an already-delivered send", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockSendPrivateReply.mockRejectedValue(
+      new MetaApiError(
+        100,
+        2534025,
+        "trace",
+        "The comment is invalid for a private reply"
+      )
+    );
+
+    const processor = getProcessor();
+    // attemptsMade 1 = this is the retry, so the first attempt already used
+    // the comment's single private reply.
+    await processor({ ...createMockJob(), attemptsMade: 1 }).catch(() => {});
+
+    const logged = mockPrisma.dmLog.update.mock.calls.at(-1)?.[0];
+    expect(logged.data.errorMessage).toContain("already delivered");
+  });
+
+  it("does not add that note on a first-attempt rejection", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockSendPrivateReply.mockRejectedValue(
+      new MetaApiError(
+        100,
+        2534025,
+        "trace",
+        "The comment is invalid for a private reply"
+      )
+    );
+
+    const processor = getProcessor();
+    // No prior attempt, so nothing of ours could have consumed the reply.
+    await processor(createMockJob()).catch(() => {});
+
+    const logged = mockPrisma.dmLog.update.mock.calls.at(-1)?.[0];
+    expect(logged.data.errorMessage).not.toContain("already delivered");
+  });
+
   it("keeps retrying a transient Meta outage", async () => {
     const { MetaApiError } = await import("@/lib/meta/client");
     mockSendPrivateReply.mockRejectedValue(

@@ -40,13 +40,19 @@ import {
   renderMessageWithoutLink,
 } from "@/lib/tracking/message";
 
-// Retry schedule for transient failures. The first retry is deliberately fast:
-// Meta's "Service temporarily unavailable" (code=2 sub=1545133) usually clears
-// in seconds, and a comment's private-reply window is narrow — waiting five
-// minutes is what turns a recoverable blip into a permanent
-// "invalid for a private reply" on the next attempt. Later retries back off for
-// account-level conditions (throttling, token refresh) that take longer to clear.
-const BACKOFF_DELAYS = [10 * 1000, 2 * 60 * 1000, 15 * 60 * 1000];
+// Retry schedule for transient failures. The first retry is immediate.
+//
+// Meta's "Service temporarily unavailable" (code=2 sub=1545133) is the common
+// first failure, and production shows it is usually not an outage at all: the
+// send went through and only the response failed. The retry then comes back
+// "The comment is invalid for a private reply", because the comment's single
+// private reply has already been used — in a 21-case sample, 20 ended that way
+// and 1 genuinely recovered. Nothing is gained by waiting: if the send did land,
+// no delay helps, and if it truly was a blip, the sooner we retry the better the
+// odds of catching the comment's narrow reply window still open. Later retries
+// back off for account-level conditions (throttling, token refresh) that do take
+// time to clear.
+const BACKOFF_DELAYS = [1 * 1000, 2 * 60 * 1000, 15 * 60 * 1000];
 
 // How many jobs the worker sends in parallel. Meta allows 750 private replies
 // per hour per account (~12/second) and the Redis reservation is atomic, so the
@@ -120,6 +126,24 @@ export function isPermanentSendFailure(error: unknown): boolean {
   }
   const message = error instanceof Error ? error.message : "";
   return PERMANENT_MESSAGES.some((pattern) => pattern.test(message));
+}
+
+/**
+ * True when a failure looks like the retry of a send that actually landed.
+ *
+ * The pattern in production: attempt 1 gets "Service temporarily unavailable"
+ * (code=2), attempt 2 gets "invalid for a private reply" — Meta rejects it
+ * because the comment's one private reply has already been used, by the very
+ * attempt that reported the outage. The DM reached the user; only our record
+ * of it says otherwise. Worth annotating so the logs are not read as a loss.
+ */
+function looksLikeAlreadyDelivered(
+  error: unknown,
+  attemptsMade: number
+): boolean {
+  if (attemptsMade < 1) return false;
+  if (!(error instanceof MetaApiError)) return false;
+  return error.subcode === 2534025;
 }
 
 /**
@@ -756,6 +780,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       }
 
       const permanent = isPermanentSendFailure(error);
+      const errorMessage = looksLikeAlreadyDelivered(error, job.attemptsMade)
+        ? `${formatError(error)} — the previous attempt reported a transient outage but had most likely already delivered this reply`
+        : formatError(error);
 
       await prisma.dmLog.update({
         where: {
@@ -767,7 +794,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         data: {
           status: "FAILED",
           attempts: job.attemptsMade + 1,
-          errorMessage: formatError(error),
+          errorMessage,
         },
       });
       throw permanent ? asUnrecoverable(error) : error;
