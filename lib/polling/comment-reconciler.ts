@@ -27,6 +27,7 @@
 
 import { prisma } from "@/lib/db/client";
 import { getDMQueue } from "@/lib/queue/client";
+import { commentDeduplication } from "@/lib/queue/comment-options";
 import {
   getRecentMediaComments,
   getUserMedia,
@@ -238,11 +239,8 @@ async function sweepCampaign(
       .slice(0, MAX_NEW_PER_SWEEP);
 
     for (const c of fresh) {
-      // No deterministic jobId here: a retained completed/failed job from an
-      // earlier sweep would otherwise be treated as a duplicate and silently
-      // drop this add, so the comment would never be retried. Dedup is handled
-      // above (owner-reply + DmLog guards) and the worker is idempotent
-      // (publicReplySentAt / SENT), so re-processing a comment is safe.
+      // Keep fresh job IDs for later public-reply retries, but share the
+      // webhook's in-flight deduplication key so both paths cannot send at once.
       await queue.add("process-comment", {
         instagramAccountId: account.instagramId,
         commentId: c.id,
@@ -259,6 +257,8 @@ async function sweepCampaign(
             ? automation.postId
             : undefined,
         source: "POLLING",
+      }, {
+        deduplication: commentDeduplication(account.instagramId, c.id),
       });
       stat.enqueued += 1;
     }

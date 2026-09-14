@@ -9,6 +9,7 @@ import {
   verifyWebhookSignature,
 } from "@/lib/meta/webhook";
 import { MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from "@/lib/queue/client";
+import { commentDeduplication } from "@/lib/queue/comment-options";
 import { recordAdMedia } from "@/lib/polling/comment-reconciler";
 import { Prisma } from "@/app/generated/prisma/client";
 
@@ -160,6 +161,7 @@ export async function POST(request: NextRequest) {
         },
         opts: {
           jobId: `comment_${event.instagramAccountId}_${event.commentId}`,
+          deduplication: commentDeduplication(event.instagramAccountId, event.commentId),
         },
       });
     }

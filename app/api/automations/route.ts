@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { DEFAULT_DM_RECOVERY_MESSAGE } from "@/lib/queue/dm-recovery";
 import { getCurrentWorkspaceId } from "@/lib/auth";
 import { prisma } from "@/lib/db/client";
 import { calculateCtr, normalizeTopKeywords } from "@/lib/tracking/analytics";
@@ -15,6 +16,9 @@ import {
 // immediately), so never cache it at the route or CDN layer.
 export const dynamic = "force-dynamic";
 
+const recoveryMessageSchema = z.string().trim().min(1).max(900)
+  .refine((value) => value.includes("{keyword}"), "Include {keyword} in the recovery comment");
+
 const createAutomationSchema = z
   .object({
     name: z.string().min(1).max(100),
@@ -27,6 +31,8 @@ const createAutomationSchema = z
     keywords: z.array(z.string().min(1).max(50)).max(10).optional().default([]),
     matchAnyWord: z.boolean().optional().default(false),
     dmTriggerEnabled: z.boolean().optional().default(false),
+    dmRecoveryEnabled: z.boolean().optional().default(true),
+    dmRecoveryMessage: recoveryMessageSchema.optional().default(DEFAULT_DM_RECOVERY_MESSAGE),
     dmMessage: z.string().min(1).max(1000),
     openingDmEnabled: z.boolean().optional().default(false),
     openingDmMessage: z.string().max(1000).optional().nullable(),
@@ -90,6 +96,8 @@ const updateAutomationSchema = z.object({
   keywords: z.array(z.string().min(1).max(50)).max(10).optional(),
   matchAnyWord: z.boolean().optional(),
   dmTriggerEnabled: z.boolean().optional(),
+  dmRecoveryEnabled: z.boolean().optional(),
+  dmRecoveryMessage: recoveryMessageSchema.optional(),
   dmMessage: z.string().min(1).max(1000).optional(),
   openingDmEnabled: z.boolean().optional(),
   openingDmMessage: z.string().max(1000).optional().nullable(),
@@ -395,6 +403,8 @@ export async function POST(request: NextRequest) {
       keywords: matchAnyWord ? [] : parsed.data.keywords,
       matchAnyWord,
       dmTriggerEnabled: parsed.data.dmTriggerEnabled,
+      dmRecoveryEnabled: parsed.data.dmRecoveryEnabled,
+      dmRecoveryMessage: parsed.data.dmRecoveryMessage,
       dmMessage: parsed.data.dmMessage,
       openingDmEnabled,
       openingDmMessage: openingDmEnabled

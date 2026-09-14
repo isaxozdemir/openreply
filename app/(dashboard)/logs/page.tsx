@@ -17,6 +17,8 @@ interface DmLog {
   commentText: string;
   status: string;
   errorMessage: string | null;
+  recoveryCommentSentAt: string | null;
+  recoveryCommentError: string | null;
   commentId: string;
   attempts: number;
   createdAt: string;
@@ -187,13 +189,15 @@ export default function LogsPage() {
                     </td>
                     <td className="px-4 py-4 sm:px-6">
                       <StatusBadge status={log.status} />
-                      {log.errorMessage && (
+                      {(log.errorMessage || log.recoveryCommentSentAt || log.recoveryCommentError) && (
                         <details className="mt-2 text-xs">
                           <summary className="cursor-pointer text-muted hover:text-foreground">
-                            Error details
+                            {log.status === "FAILED" ? "Error details" : "Details"}
                           </summary>
                           <div className="mt-2 w-72 space-y-2 whitespace-pre-wrap break-words text-muted">
-                            <p>{log.errorMessage}</p>
+                            {log.errorMessage && <p>{log.errorMessage}</p>}
+                            {log.recoveryCommentSentAt && <p>Recovery instruction posted under the comment.</p>}
+                            {log.recoveryCommentError && <p>Recovery comment failed: {log.recoveryCommentError}</p>}
                             <p>Attempts: {log.attempts}</p>
                             <p>Comment / event: {log.commentId}</p>
                           </div>

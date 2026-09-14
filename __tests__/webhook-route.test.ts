@@ -110,6 +110,13 @@ describe("webhook route under a burst", () => {
     ]);
   });
 
+  it("shares an in-flight key with polling even when job IDs differ", async () => {
+    await POST(signedRequest(commentBurst(1)));
+    expect(mockQueue.addBulk.mock.calls[0][0][0].opts.deduplication).toEqual({
+      id: "comment_ig_account_1_comment_0",
+    });
+  });
+
   it("uses one attributed receipt and one outcome update per delivery", async () => {
     await POST(signedRequest(commentBurst(100)));
 

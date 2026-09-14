@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { DEFAULT_DM_RECOVERY_MESSAGE } from "@/lib/queue/dm-recovery";
 import AccountSelect, { type AccountOption } from "@/components/account-select";
 import PostPicker from "@/components/post-picker";
 import CampaignPreview, { type PreviewTab } from "@/components/campaign-preview";
@@ -37,6 +38,8 @@ interface LoadedCampaign {
   keywords: string[];
   matchAnyWord: boolean;
   dmTriggerEnabled: boolean;
+  dmRecoveryEnabled: boolean;
+  dmRecoveryMessage: string;
   dmMessage: string;
   openingDmEnabled: boolean;
   openingDmMessage: string | null;
@@ -158,6 +161,8 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
   const [matchMode, setMatchMode] = useState<MatchMode>("specific");
   const [keywordText, setKeywordText] = useState("");
   const [dmTriggerEnabled, setDmTriggerEnabled] = useState(false);
+  const [dmRecoveryEnabled, setDmRecoveryEnabled] = useState(true);
+  const [dmRecoveryMessage, setDmRecoveryMessage] = useState(DEFAULT_DM_RECOVERY_MESSAGE);
 
   const [publicReplyEnabled, setPublicReplyEnabled] = useState(false);
   const [publicReplyMessages, setPublicReplyMessages] = useState<string[]>([""]);
@@ -259,6 +264,8 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
         setMatchMode(c.matchAnyWord ? "any" : "specific");
         setKeywordText(c.keywords.join(", "));
         setDmTriggerEnabled(c.dmTriggerEnabled ?? false);
+        setDmRecoveryEnabled(c.dmRecoveryEnabled ?? true);
+        setDmRecoveryMessage(c.dmRecoveryMessage ?? DEFAULT_DM_RECOVERY_MESSAGE);
         setPublicReplyEnabled(c.publicReplyEnabled);
         setPublicReplyMessages(
           c.publicReplyMessages?.length
@@ -407,6 +414,8 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
       matchAnyWord: matchMode === "any",
       keywords: matchMode === "any" ? [] : keywords,
       dmTriggerEnabled,
+      dmRecoveryEnabled,
+      dmRecoveryMessage,
       dmMessage,
       openingDmEnabled,
       openingDmMessage: openingDmEnabled ? openingDmMessage : null,
@@ -794,6 +803,33 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
                 One is picked at random each time, so replies don&apos;t look
                 identical.
               </p>
+            </div>
+          )}
+          {publicReplyEnabled && matchMode === "specific" && (
+            <div className="space-y-2 rounded-lg border border-border p-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm text-foreground">help people when the first DM fails</span>
+                <Toggle on={dmRecoveryEnabled} onToggle={() => setDmRecoveryEnabled(!dmRecoveryEnabled)} />
+              </div>
+              {dmRecoveryEnabled && (
+                <>
+                  <textarea
+                    aria-label="DM recovery comment"
+                    value={dmRecoveryMessage}
+                    onChange={(e) => setDmRecoveryMessage(e.target.value)}
+                    maxLength={900}
+                    rows={2}
+                    className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus:border-accent/40 focus:outline-none"
+                  />
+                  <p className="text-xs text-muted">
+                    If Instagram rejects the private reply or remains unavailable after retries,
+                    post this instruction under their comment. Keep {"{keyword}"} in the text;
+                    it becomes the word they commented. For 7 days after a failed send, a DM with
+                    a campaign keyword continues this campaign, including its follow requirement,
+                    even when general DM replies are off.
+                  </p>
+                </>
+              )}
             </div>
           )}
         </Section>

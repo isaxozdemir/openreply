@@ -1,16 +1,19 @@
-import { UnrecoverableError, Worker, type Job } from "bullmq";
+import { DelayedError, UnrecoverableError, Worker, type Job } from "bullmq";
 import {
   getDMQueue,
   getRedisConnection,
   MESSAGE_JOB_NAME,
   POSTBACK_JOB_NAME,
   FOLLOWUP_JOB_NAME,
+  RECOVERY_JOB_NAME,
   type DmQueueJob,
   type ProcessCommentJob,
   type ProcessMessageJob,
   type ProcessPostbackJob,
   type ProcessFollowUpJob,
+  type ProcessRecoveryJob,
 } from "./client";
+import { canRecoverPrivateReply, DM_RECOVERY_LOOKBACK_MS } from "./dm-recovery";
 import { prisma } from "@/lib/db/client";
 import {
   FOLLOW_STATUS_NO_CONSENT,
@@ -83,7 +86,11 @@ function isTemplateRejection(error: unknown): boolean {
     return false;
   }
   const message = error instanceof Error ? error.message : "";
-  return !NON_TEMPLATE_REJECTIONS.some((pattern) => pattern.test(message));
+  if (NON_TEMPLATE_REJECTIONS.some((pattern) => pattern.test(message))) return false;
+  if (error instanceof MetaApiError && error.code !== 100) return false;
+  // Network outages and generic API failures do not justify a second send in
+  // the same attempt: the first request may already have consumed the reply.
+  return /template|button|attachment/i.test(message);
 }
 
 // Meta error subcodes that no retry can fix. The comment, the thread, or the
@@ -131,7 +138,56 @@ export function isPermanentSendFailure(error: unknown): boolean {
     }
   }
   const message = error instanceof Error ? error.message : "";
+  const storedSubcode = message.match(/\bsub=(\d+)/)?.[1];
+  if (storedSubcode && PERMANENT_SUBCODES.has(Number(storedSubcode))) return true;
   return PERMANENT_MESSAGES.some((pattern) => pattern.test(message));
+}
+
+async function scheduleDmRecovery(
+  automation: { id: string; dmRecoveryEnabled: boolean; publicReplyEnabled: boolean; matchAnyWord: boolean; keywords: string[] },
+  instagramAccountId: string,
+  commentId: string,
+  errorMessage: string | null | undefined
+) {
+  if (!automation.dmRecoveryEnabled || !automation.publicReplyEnabled ||
+      automation.matchAnyWord || automation.keywords.length === 0 ||
+      !canRecoverPrivateReply(errorMessage)) return;
+
+  await getDMQueue().add(RECOVERY_JOB_NAME, {
+    instagramAccountId, automationId: automation.id, commentId,
+  }, {
+    jobId: `recovery_${instagramAccountId}_${commentId}`,
+    delay: 10_000,
+  });
+}
+
+async function processDmRecovery(job: Job<ProcessRecoveryJob>): Promise<void> {
+  const { automationId, instagramAccountId, commentId } = job.data;
+  const automation = await prisma.automation.findFirst({
+    where: { id: automationId, isActive: true, dmRecoveryEnabled: true, publicReplyEnabled: true },
+    include: { instagramAccount: true },
+  });
+  if (!automation || automation.matchAnyWord ||
+      automation.instagramAccount.instagramId !== instagramAccountId) return;
+
+  const where = { automationId_commentId: { automationId, commentId } };
+  const log = await prisma.dmLog.findUnique({ where });
+  if (!log || log.status !== "FAILED" || log.recoveryCommentSentAt ||
+      !canRecoverPrivateReply(log.errorMessage)) return;
+  const keyword = log.matchedKeyword ?? automation.keywords[0];
+  if (!keyword || !automation.keywords.includes(keyword)) return;
+
+  const message = automation.dmRecoveryMessage.replaceAll("{keyword}", keyword);
+  try {
+    await sendCommentReply(decryptToken(automation.instagramAccount.accessToken), commentId, message);
+    // The DM remains FAILED: a public recovery instruction is not a delivered DM.
+    await prisma.dmLog.update({ where, data: {
+      recoveryCommentSentAt: new Date(), recoveryCommentError: null,
+    } });
+  } catch (error) {
+    await prisma.dmLog.update({ where, data: { recoveryCommentError: formatError(error) } });
+    throw isPermanentSendFailure(error) ? asUnrecoverable(error) : error;
+  }
 }
 
 /**
@@ -363,7 +419,11 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
     const alreadyDmd = existingLog?.status === "SENT";
     const alreadyPublicReplied = Boolean(existingLog?.publicReplySentAt);
-    const needsDm = !alreadyDmd;
+    const terminalFailure = existingLog?.status === "FAILED" && (
+      isPermanentSendFailure(new Error(existingLog.errorMessage ?? "")) ||
+      (existingLog.attempts >= (job.opts?.attempts ?? 3) && canRecoverPrivateReply(existingLog.errorMessage))
+    );
+    const needsDm = !alreadyDmd && !terminalFailure;
 
     // Skip only when there is genuinely nothing left to do. A comment whose DM
     // already sent but whose public reply never posted (e.g. it hit a rate
@@ -510,7 +570,12 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
     // DM already sent on an earlier pass; the public reply retry above was all
     // this run needed. Don't re-send the DM.
-    if (!needsDm) continue;
+    if (!needsDm) {
+      if (terminalFailure) {
+        await scheduleDmRecovery(automation, instagramAccountId, commentId, existingLog?.errorMessage);
+      }
+      continue;
+    }
 
     // Meta allows exactly ONE private reply per comment, ever — across every
     // campaign. When several campaigns match the same comment (duplicated
@@ -621,18 +686,11 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           },
         });
 
-        await getDMQueue().add(
-          "process-comment",
-          {
-            ...job.data,
-            requeueAttempt: requeueAttempt + 1,
-          },
-          {
-            delay: rateLimit.requeueDelayMs,
-            jobId: `comment_${instagramAccountId}_${commentId}_retry_${requeueAttempt + 1}`,
-          }
-        );
-        continue;
+        // Keep the same in-flight deduplication key while rate limited.
+        // Creating a separate delayed job let polling race it with a fresh one.
+        await job.updateData({ ...job.data, requeueAttempt: requeueAttempt + 1 });
+        await job.moveToDelayed(Date.now() + rateLimit.requeueDelayMs, job.token);
+        throw new DelayedError();
       }
     }
 
@@ -810,6 +868,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage,
         },
       });
+      if (permanent || job.attemptsMade + 1 >= (job.opts?.attempts ?? 3)) {
+        await scheduleDmRecovery(automation, instagramAccountId, commentId, errorMessage);
+      }
       throw permanent ? asUnrecoverable(error) : error;
     }
   }
@@ -1177,7 +1238,19 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
 
   const automations = await prisma.automation.findMany({
     where: {
-      dmTriggerEnabled: true,
+      OR: [
+        { dmTriggerEnabled: true },
+        {
+          dmRecoveryEnabled: true,
+          matchAnyWord: false,
+          dmLogs: { some: {
+            commenterId: senderId,
+            status: "FAILED",
+            commentId: { not: { contains: ":" } },
+            createdAt: { gte: new Date(Date.now() - DM_RECOVERY_LOOKBACK_MS) },
+          } },
+        },
+      ],
       isActive: true,
       instagramAccount: { instagramId: instagramAccountId },
     },
@@ -1204,6 +1277,24 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         );
 
     if (!matchResult.matched) continue;
+
+    // A recovery-only campaign must have a recent failed private reply for
+    // this sender. General DM triggers keep their existing behavior.
+    if (!automation.dmTriggerEnabled) {
+      if (!automation.dmRecoveryEnabled || automation.matchAnyWord) continue;
+      const failedReply = await prisma.dmLog.findFirst({
+        where: {
+          automationId: automation.id,
+          commenterId: senderId,
+          status: "FAILED",
+          commentId: { not: { contains: ":" } },
+          createdAt: { gte: new Date(Date.now() - DM_RECOVERY_LOOKBACK_MS) },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { errorMessage: true },
+      });
+      if (!canRecoverPrivateReply(failedReply?.errorMessage)) continue;
+    }
 
     const existingLog = await prisma.dmLog.findUnique({
       where: {
@@ -1432,6 +1523,9 @@ async function processJob(job: Job<DmQueueJob>): Promise<void> {
   }
   if (job.name === MESSAGE_JOB_NAME) {
     return processMessage(job as Job<ProcessMessageJob>);
+  }
+  if (job.name === RECOVERY_JOB_NAME) {
+    return processDmRecovery(job as Job<ProcessRecoveryJob>);
   }
   return processComment(job as Job<ProcessCommentJob>);
 }

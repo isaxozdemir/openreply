@@ -32,6 +32,7 @@ OpenReply is built around Meta's official Instagram private replies. It does not
 
 - Keyword to DM. Match one or many keywords per post, whole-word or partial.
 - Optional public reply. Post a visible comment reply on top of the DM.
+- Failed DM recovery. Keyword campaigns with public replies enabled default to posting `Mesaj ulaşmadıysa bana DM’den {keyword} yaz.` when Meta rejects a private reply as invalid or its temporary service failure exhausts retries. Edit or disable this in the campaign builder. A matching inbound DM from someone with a qualifying failed comment in the last 7 days resumes that campaign with its existing follow gate, even if general DM triggers are off. Recovery comments have their own delivery record; the original failed DM stays failed. This does not resend historical failures in bulk or guarantee Meta delivery.
 - DM and Story reply triggers. The same keywords can also fire on an inbound DM, which covers text replies to your Stories, since Instagram delivers those as DMs. That makes `Reply LINK to this Story` work with no post involved. Turn it on per campaign, and subscribe to the `messages` webhook field when you set up your Meta app.
 - Tracked links. Swap a link for a tracked redirect and see clicks and CTR per campaign.
 - Two link buttons. Send up to two tappable link buttons in one DM, each a separate tracked link with its own click stats.

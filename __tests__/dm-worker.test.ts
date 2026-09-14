@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const {
   mockPrisma,
   mockSendPrivateReply,
+  mockSendCommentReply,
   mockSendPrivateReplyWithLinkButton,
   mockSendPrivateReplyWithButton,
   mockGetUserFollowStatus,
@@ -37,6 +38,7 @@ const {
     },
   },
   mockSendPrivateReply: vi.fn(),
+  mockSendCommentReply: vi.fn(),
   mockSendPrivateReplyWithLinkButton: vi.fn(),
   mockSendPrivateReplyWithButton: vi.fn(),
   mockGetUserFollowStatus: vi.fn(),
@@ -67,7 +69,7 @@ vi.mock("@/lib/meta/client", () => ({
   sendDirectMessageWithButton: mockSendDirectMessageWithButton,
   sendDirectMessage: mockSendDirectMessage,
   sendDirectMessageWithLinkButton: mockSendDirectMessageWithLinkButton,
-  sendCommentReply: vi.fn(),
+  sendCommentReply: mockSendCommentReply,
   MetaApiError: class MetaApiError extends Error {
     code: number;
     subcode: number | undefined;
@@ -121,6 +123,7 @@ vi.mock("@/lib/queue/client", () => ({
   POSTBACK_JOB_NAME: "process-postback",
   FOLLOWUP_JOB_NAME: "process-followup",
   MESSAGE_JOB_NAME: "process-message",
+  RECOVERY_JOB_NAME: "process-dm-recovery",
 }));
 
 vi.mock("bullmq", () => {
@@ -141,6 +144,7 @@ vi.mock("bullmq", () => {
   }
   return {
     Worker: MockWorker,
+    DelayedError: class extends Error { constructor() { super("bullmq:movedToDelayed"); } },
     UnrecoverableError: MockUnrecoverableError,
   };
 });
@@ -164,6 +168,9 @@ const mockAutomation = {
   openingDmMessage: null,
   openingDmButtonLabel: null,
   linkButtonLabel: null,
+  dmTriggerEnabled: false,
+  dmRecoveryEnabled: false,
+  dmRecoveryMessage: "Mesaj ulaşmadıysa bana DM’den {keyword} yaz.",
   publicReplyEnabled: false,
   publicReplyMessage: null,
   publicReplyMessages: [],
@@ -207,6 +214,10 @@ function createMockJob(data: Record<string, unknown> = mockJobData) {
     data,
     id: "job_001",
     attemptsMade: 0,
+    opts: { attempts: 3 },
+    token: "worker-token",
+    updateData: vi.fn().mockResolvedValue(undefined),
+    moveToDelayed: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -441,24 +452,17 @@ describe("DM Worker — Full Pipeline", () => {
     });
 
     const processor = getProcessor();
-    await processor(createMockJob());
+    const job = createMockJob();
+    await expect(processor(job)).rejects.toThrow("bullmq:movedToDelayed");
 
     expect(mockReleaseWorkspaceDMReservation).toHaveBeenCalledWith(
       "workspace_123",
       usagePeriodStart
     );
     expect(mockSendPrivateReply).not.toHaveBeenCalled();
-    expect(mockQueueAdd).toHaveBeenCalledWith(
-      "process-comment",
-      expect.objectContaining({
-        commentId: "comment_555",
-        requeueAttempt: 1,
-      }),
-      expect.objectContaining({
-        delay: 1800000,
-        jobId: "comment_ig_456_comment_555_retry_1",
-      })
-    );
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(job.updateData).toHaveBeenCalledWith(expect.objectContaining({ requeueAttempt: 1 }));
+    expect(job.moveToDelayed).toHaveBeenCalledWith(expect.any(Number), "worker-token");
   });
 
   it("should skip with SKIPPED_RATE_LIMIT after max requeue attempts", async () => {
@@ -981,7 +985,7 @@ describe("DM Worker — DM keyword trigger", () => {
     expect(mockPrisma.automation.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          dmTriggerEnabled: true,
+          OR: expect.arrayContaining([{ dmTriggerEnabled: true }]),
           isActive: true,
         }),
       })
@@ -1395,5 +1399,175 @@ describe("DM Worker — retry budget and rate-limit slots", () => {
     await processor(createMockJob());
 
     expect(mockReleaseDMSlot).not.toHaveBeenCalled();
+  });
+});
+
+describe("DM Worker — failed private reply recovery", () => {
+  const recoveryAutomation = {
+    ...mockAutomation,
+    dmRecoveryEnabled: true,
+    publicReplyEnabled: true,
+  };
+  const failure = {
+    status: "FAILED",
+    errorMessage: "Meta API Error 100: invalid for a private reply [sub=2534025]",
+    matchedKeyword: "LINK",
+    attempts: 1,
+    recoveryCommentSentAt: null,
+    publicReplySentAt: new Date(),
+  };
+  const recoveryJob = () => ({
+    ...createMockJob({
+      instagramAccountId: "ig_456",
+      automationId: "auto_789",
+      commentId: "comment_555",
+    }),
+    name: "process-dm-recovery",
+  });
+  const messageJob = () => ({
+    ...createMockJob({
+      instagramAccountId: "ig_456",
+      messageId: "recovery_inbound_1",
+      messageText: "LINK",
+      senderId: "commenter_999",
+    }),
+    name: "process-message",
+  });
+
+  beforeEach(() => {
+    mockPrisma.automation.findMany.mockResolvedValue([recoveryAutomation]);
+    mockPrisma.automation.findFirst.mockResolvedValue(recoveryAutomation);
+    mockSendCommentReply.mockResolvedValue({ id: "reply_1" });
+  });
+
+  it("schedules a recovery comment after a permanent private reply rejection", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockSendPrivateReply.mockRejectedValue(new MetaApiError(100, 2534025, undefined, failure.errorMessage));
+    await expect(getProcessor()(createMockJob())).rejects.toThrow("invalid for a private reply");
+    expect(mockQueueAdd).toHaveBeenCalledWith("process-dm-recovery", {
+      instagramAccountId: "ig_456", automationId: "auto_789", commentId: "comment_555",
+    }, expect.objectContaining({ jobId: "recovery_ig_456_comment_555", delay: 10000 }));
+  });
+
+  it("does not send plain text immediately after a transient button failure", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockPrisma.automation.findMany.mockResolvedValue([{
+      ...recoveryAutomation, openingDmEnabled: true,
+      openingDmMessage: "Tap below", openingDmButtonLabel: "Send",
+    }]);
+    mockSendPrivateReplyWithButton.mockRejectedValue(new MetaApiError(2, 1545133, undefined, "Service temporarily unavailable"));
+    await expect(getProcessor()(createMockJob())).rejects.toThrow("Service temporarily unavailable");
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledTimes(1);
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it("schedules recovery when transient private reply attempts are exhausted", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockSendPrivateReply.mockRejectedValue(new MetaApiError(2, 1545133, undefined, "Service temporarily unavailable"));
+    const job = createMockJob();
+    job.attemptsMade = 2;
+    await expect(getProcessor()(job)).rejects.toThrow();
+    expect(mockQueueAdd).toHaveBeenCalledWith("process-dm-recovery", expect.anything(), expect.anything());
+  });
+
+  it("does not re-send a terminal private reply when polling enqueues it again", async () => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue(failure);
+    await getProcessor()(createMockJob());
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockReserveDMSlot).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).not.toHaveBeenCalled();
+    expect(mockQueueAdd).toHaveBeenCalledWith("process-dm-recovery", expect.anything(), expect.anything());
+  });
+
+  it("posts the requested instruction without marking the failed DM sent", async () => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue(failure);
+    await getProcessor()(recoveryJob());
+    expect(mockSendCommentReply).toHaveBeenCalledWith("decrypted_token", "comment_555", "Mesaj ulaşmadıysa bana DM’den LINK yaz.");
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith({
+      where: { automationId_commentId: { automationId: "auto_789", commentId: "comment_555" } },
+      data: { recoveryCommentSentAt: expect.any(Date), recoveryCommentError: null },
+    });
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { ...failure, recoveryCommentSentAt: new Date() },
+    { ...failure, status: "SENT" },
+    { ...failure, errorMessage: "The requested user cannot be found [sub=2534014]" },
+  ])("does not post an instruction for an already handled or ineligible record %#", async (log) => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue(log);
+    await getProcessor()(recoveryJob());
+    expect(mockSendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("does not recover an inactive/disabled campaign or a different account", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValueOnce(null);
+    await getProcessor()(recoveryJob());
+    expect(mockPrisma.automation.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ isActive: true, dmRecoveryEnabled: true, publicReplyEnabled: true }),
+    }));
+    mockPrisma.automation.findFirst.mockResolvedValueOnce({ ...recoveryAutomation, instagramAccount: { ...mockAutomation.instagramAccount, instagramId: "other_account" } });
+    await getProcessor()(recoveryJob());
+    expect(mockSendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("records recovery comment errors separately from the original DM failure", async () => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue(failure);
+    mockSendCommentReply.mockRejectedValue(new Error("Public comment request failed"));
+    await expect(getProcessor()(recoveryJob())).rejects.toThrow("Public comment request failed");
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: { recoveryCommentError: "Public comment request failed" },
+    }));
+  });
+
+  it("resumes a recent failed campaign from an inbound keyword with general DM triggers off", async () => {
+    mockPrisma.dmLog.findFirst.mockResolvedValue(failure);
+    await getProcessor()(messageJob());
+    expect(mockPrisma.dmLog.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        automationId: "auto_789", commenterId: "commenter_999", status: "FAILED",
+        commentId: { not: { contains: ":" } }, createdAt: { gte: expect.any(Date) },
+      }),
+    }));
+    expect(mockPrisma.automation.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ instagramAccount: { instagramId: "ig_456" } }),
+    }));
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
+
+  it.each([null, { errorMessage: "No Instagram access token available" }])("ignores an inbound keyword without an eligible recent failure %#", async (record) => {
+    mockPrisma.dmLog.findFirst.mockResolvedValue(record);
+    await getProcessor()(messageJob());
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    expect(mockReserveDMSlot).not.toHaveBeenCalled();
+  });
+
+  it("ignores unrelated inbound text even when a failure exists", async () => {
+    mockPrisma.dmLog.findFirst.mockResolvedValue(failure);
+    mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
+    await getProcessor()(messageJob());
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("preserves the follow gate during recovery", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{
+      ...recoveryAutomation, requireFollow: true,
+      followPromptMessage: "Follow first", followPromptButtonLabel: "Check",
+    }]);
+    mockPrisma.dmLog.findFirst.mockResolvedValue(failure);
+    mockGetUserFollowStatus.mockResolvedValue(false);
+    await getProcessor()(messageJob());
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+  });
+
+  it("does not recover the same inbound message twice", async () => {
+    mockPrisma.dmLog.findFirst.mockResolvedValue(failure);
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "SENT" });
+    await getProcessor()(messageJob());
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
   });
 });

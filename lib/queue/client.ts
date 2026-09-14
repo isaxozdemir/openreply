@@ -35,7 +35,7 @@ export interface ProcessCommentJob {
   originalMediaId?: string;
   requeueAttempt?: number;
   // Which path enqueued this comment. Diagnostic only: dedup is enforced by the
-  // DmLog guards in the reconciler and the worker, not by this field.
+  // shared queue key and DmLog guards, not by this field.
   source?: CommentSource;
 }
 
@@ -67,15 +67,23 @@ export interface ProcessMessageJob {
   senderId: string;
 }
 
+export interface ProcessRecoveryJob {
+  instagramAccountId: string;
+  automationId: string;
+  commentId: string;
+}
+
 export type DmQueueJob =
   | ProcessCommentJob
   | ProcessPostbackJob
   | ProcessFollowUpJob
-  | ProcessMessageJob;
+  | ProcessMessageJob
+  | ProcessRecoveryJob;
 
 export const POSTBACK_JOB_NAME = "process-postback";
 export const FOLLOWUP_JOB_NAME = "process-followup";
 export const MESSAGE_JOB_NAME = "process-message";
+export const RECOVERY_JOB_NAME = "process-dm-recovery";
 
 let dmQueue: Queue<DmQueueJob> | null = null;
 
